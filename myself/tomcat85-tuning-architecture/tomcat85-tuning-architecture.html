@@ -834,38 +834,141 @@ graph TD
 
       <h3>4.1 完整调用链路图</h3>
 
+      <p>一个 HTTP 请求从客户端发出到 Tomcat 处理完毕并返回响应，需要经过<strong>请求阶段（15 步）</strong>和<strong>响应阶段（6 步）</strong>共 21 个关键节点。下图按线程上下文分为四个泳道：<mark class="key">Acceptor 线程 → Poller 线程 → 工作线程 → 响应回写</mark>。</p>
+
       <figure class="diagram">
         <pre class="mermaid">
 graph TD
-    A["1. Acceptor.run()<br/>接收 TCP 连接"] --> B["2. NioEndpoint.setSocketOptions()<br/>配置非阻塞 + 注册 Poller"]
-    B --> C["3. Poller.run()<br/>Selector 检测 OP_READ 就绪"]
-    C --> D["4. SocketProcessor.doRun()<br/>提交到工作线程池"]
-    D --> E["5. ConnectionHandler.process()<br/>获取/创建 Http11Processor"]
-    E --> F["6. Http11Processor.service()<br/>解析 HTTP 请求行 + 头"]
-    F --> G["7. CoyoteAdapter.service()<br/>Coyote→Catalina 请求转换"]
-    G --> H["8. Engine.getPipeline().getFirst().invoke()<br/>进入 Engine 管道"]
-    H --> I["9. StandardEngineValve → Host Pipeline<br/>按 Host 名路由"]
-    I --> J["10. StandardHostValve → Context Pipeline<br/>按 URL 路径路由"]
-    J --> K["11. StandardContextValve → Wrapper Pipeline<br/>按 Servlet 映射路由"]
-    K --> L["12. StandardWrapperValve<br/>构建 FilterChain → 调用 Servlet"]
-    L --> M["Servlet.service()<br/>业务逻辑执行"]
+    subgraph L1["Acceptor 线程"]
+        A1["① Acceptor.run()<br/>serverSocket.accept()<br/>接收 TCP 连接"]
+        A2["② setSocketOptions()<br/>configureBlocking(false)<br/>setTcpNoDelay / setSoTimeout"]
+        A3["③ NioSocketWrapper 包装<br/>设置 keepAlive / readTimeout"]
+        A4["④ poller.register(wrapper)<br/>注册到 Poller 的事件队列"]
+    end
 
-    style A fill:#334155,stroke:#38bdf8,color:#e2e8f0
-    style B fill:#334155,stroke:#38bdf8,color:#e2e8f0
-    style C fill:#334155,stroke:#38bdf8,color:#e2e8f0
-    style D fill:#334155,stroke:#38bdf8,color:#e2e8f0
-    style E fill:#334155,stroke:#a78bfa,color:#e2e8f0
-    style F fill:#334155,stroke:#a78bfa,color:#e2e8f0
-    style G fill:#334155,stroke:#fbbf24,color:#e2e8f0
-    style H fill:#334155,stroke:#34d399,color:#e2e8f0
-    style I fill:#334155,stroke:#34d399,color:#e2e8f0
-    style J fill:#334155,stroke:#34d399,color:#e2e8f0
-    style K fill:#334155,stroke:#34d399,color:#e2e8f0
-    style L fill:#334155,stroke:#fbbf24,color:#e2e8f0
-    style M fill:#1e293b,stroke:#f87171,color:#e2e8f0
+    subgraph L2["Poller 线程 Selector"]
+        B1["⑤ events() 刷新新注册<br/>将 OP_READ 注册到 Selector"]
+        B2["⑥ selector.select(timeout)<br/>检测 Socket 读就绪"]
+        B3["⑦ processKey(sk, wrapper)<br/>取消 OP_READ → 提交任务"]
+    end
+
+    subgraph L3["工作线程池 ThreadPool"]
+        C1["⑧ SocketProcessor.doRun()<br/>handler.process(wrapper, OPEN_READ)"]
+        C2["⑨ ConnectionHandler.process()<br/>从回收栈获取或新建 Processor"]
+        C3["⑩ Http11Processor.service()<br/>parseRequestLine → parseHeaders"]
+        C4["⑪ CoyoteAdapter.service()<br/>CoyoteReq → CatalinaReq 转换"]
+        C5["⑫ postParseRequest()<br/>URL 解码 + Mapper.map()<br/>路由 Host → Context → Wrapper"]
+        C6["⑬ Engine Pipeline.invoke()<br/>EngineValve → HostValve"]
+        C7["⑭ Host/Context Pipeline<br/>HostValve → ContextValve"]
+        C8["⑮ StandardWrapperValve.invoke()<br/>allocate Servlet + 构建 FilterChain"]
+        C9["⑯ ApplicationFilterChain.doFilter()<br/>Filter1 → Filter2 → ... → FilterN"]
+        C10["⑰ Servlet.service(req, resp)<br/>业务逻辑执行"]
+    end
+
+    subgraph L4["响应回写阶段"]
+        D1["⑱ FilterChain 逆序返回<br/>各 Filter 后置处理"]
+        D2["⑲ WrapperValve.deallocate(servlet)<br/>释放 Servlet 实例"]
+        D3["⑳ Http11Processor 输出响应<br/>action(COMMIT) → 写状态行/头/体"]
+        D4["㉑ CoyoteAdapter.finishResponse()<br/>刷新输出缓冲"]
+        D5["㉒ Keep-Alive 判断<br/>复用连接 or 关闭 Socket"]
+        D6["㉓ Poller 重新注册 OP_READ<br/>或 closeSocket()"]
+    end
+
+    A1 --> A2 --> A3 --> A4
+    A4 -->|"跨线程: 加入 Poller events 队列"| B1
+    B1 --> B2 --> B3
+    B3 -->|"跨线程: executor.execute(SocketProcessor)"| C1
+    C1 --> C2 --> C3 --> C4 --> C5 --> C6 --> C7 --> C8 --> C9 --> C10
+    C10 --> D1 --> D2 --> D3 --> D4 --> D5 --> D6
+    D6 -.->|"连接复用"| B2
+
+    style A1 fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    style A2 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style A3 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style A4 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style B1 fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    style B2 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style B3 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style C1 fill:#1e293b,stroke:#a78bfa,color:#e2e8f0
+    style C2 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style C3 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style C4 fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style C5 fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style C6 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style C7 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style C8 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style C9 fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style C10 fill:#1e293b,stroke:#f87171,color:#e2e8f0
+    style D1 fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style D2 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style D3 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style D4 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style D5 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style D6 fill:#334155,stroke:#38bdf8,color:#e2e8f0
         </pre>
-        <figcaption>图 5：Tomcat 8.5 HTTP 请求全链路处理流程（12 步）</figcaption>
+        <figcaption>图 5：Tomcat 8.5 HTTP 请求全链路处理流程（请求 17 步 + 响应 6 步，含线程上下文与 Keep-Alive 复用）</figcaption>
       </figure>
+
+      <h4>请求阶段：12 步详细调用表</h4>
+
+      <p>下表逐步列出请求阶段的每个节点，标注其<strong>源码类、关键方法、执行线程</strong>及核心职责：</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>步骤</th><th>源码类</th><th>关键方法</th><th>执行线程</th><th>核心职责</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>①</td><td><code>NioEndpoint.Acceptor</code></td><td><code>run()</code></td><td>Acceptor 线程</td><td>循环调用 <code>ServerSocketChannel.accept()</code> 接收 TCP 连接</td></tr>
+            <tr><td>②</td><td><code>NioEndpoint</code></td><td><code>setSocketOptions(channel)</code></td><td>Acceptor 线程</td><td>设置非阻塞模式、TCP 参数（NoDelay、SoTimeout）</td></tr>
+            <tr><td>③</td><td><code>NioEndpoint</code></td><td><code>new NioSocketWrapper()</code></td><td>Acceptor 线程</td><td>将 SocketChannel 包装为 NioSocketWrapper，设置 KeepAlive/超时</td></tr>
+            <tr><td>④</td><td><code>NioEndpoint.Poller</code></td><td><code>register(wrapper)</code></td><td>Acceptor → Poller</td><td>将 wrapper 加入 Poller 的事件队列（跨线程传递）</td></tr>
+            <tr><td>⑤</td><td><code>NioEndpoint.Poller</code></td><td><code>events()</code></td><td>Poller 线程</td><td>处理事件队列，将 OP_READ 注册到 Selector</td></tr>
+            <tr><td>⑥</td><td><code>NioEndpoint.Poller</code></td><td><code>selector.select(timeout)</code></td><td>Poller 线程</td><td>阻塞等待数据就绪（客户端发送 HTTP 报文）</td></tr>
+            <tr><td>⑦</td><td><code>NioEndpoint.Poller</code></td><td><code>processKey(sk, wrapper)</code></td><td>Poller → 工作线程</td><td>取消 OP_READ，创建 SocketProcessor 提交线程池</td></tr>
+            <tr><td>⑧</td><td><code>NioEndpoint.SocketProcessor</code></td><td><code>doRun()</code></td><td>工作线程</td><td>调用 <code>handler.process(wrapper, OPEN_READ)</code></td></tr>
+            <tr><td>⑨</td><td><code>AbstractProtocol.ConnectionHandler</code></td><td><code>process(wrapper, event)</code></td><td>工作线程</td><td>从回收栈获取或新建 Http11Processor，复用连接时优先取回收的</td></tr>
+            <tr><td>⑩</td><td><code>Http11Processor</code></td><td><code>service(wrapper)</code></td><td>工作线程</td><td>状态机解析 HTTP 请求行（方法/URI/协议）+ 请求头（Host/Content-Type 等）</td></tr>
+            <tr><td>⑪</td><td><code>CoyoteAdapter</code></td><td><code>service(coyoteReq, coyoteResp)</code></td><td>工作线程</td><td>创建 Catalina Request/Response，桥接 Coyote 与 Container</td></tr>
+            <tr><td>⑫</td><td><code>CoyoteAdapter</code></td><td><code>postParseRequest()</code></td><td>工作线程</td><td>URL 解码 + <code>Mapper.map()</code> 路由匹配 Host → Context → Wrapper + 解析 Session ID</td></tr>
+            <tr><td>⑬</td><td><code>StandardEngine</code></td><td><code>getPipeline().getFirst().invoke()</code></td><td>工作线程</td><td>进入 Engine Pipeline，执行自定义 Valve 后到达 EngineValve</td></tr>
+            <tr><td>⑭</td><td><code>StandardHostValve → StandardContextValve</code></td><td><code>invoke(req, resp)</code></td><td>工作线程</td><td>Host Pipeline 按 Host 名路由 → Context Pipeline 按路径路由</td></tr>
+            <tr><td>⑮</td><td><code>StandardWrapperValve</code></td><td><code>invoke(req, resp)</code></td><td>工作线程</td><td><code>wrapper.allocate()</code> 加载 Servlet + <code>createFilterChain()</code> 构建过滤器链</td></tr>
+            <tr><td>⑯</td><td><code>ApplicationFilterChain</code></td><td><code>doFilter(req, resp)</code></td><td>工作线程</td><td>递归执行 Filter 链（洋葱模型），每个 Filter 内回调 <code>chain.doFilter()</code></td></tr>
+            <tr><td>⑰</td><td><code>HttpServlet</code></td><td><code>service(req, resp)</code></td><td>工作线程</td><td>根据 HTTP 方法分发到 <code>doGet/doPost/doPut/doDelete</code>，执行业务逻辑</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4>响应阶段：6 步回写流程</h4>
+
+      <p>Servlet 业务逻辑执行完毕后，响应数据沿<strong>逆序路径</strong>回写到客户端：</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>步骤</th><th>源码类</th><th>关键方法</th><th>核心职责</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>⑱</td><td><code>ApplicationFilterChain</code></td><td>Filter 后置回调</td><td>Filter 链逆序返回，执行各 Filter 的响应后处理逻辑</td></tr>
+            <tr><td>⑲</td><td><code>StandardWrapperValve</code></td><td><code>deallocate(servlet)</code></td><td>释放 Servlet 实例（单例则归还，非单例则销毁）</td></tr>
+            <tr><td>⑳</td><td><code>Http11Processor</code></td><td><code>action(ActionCode.COMMIT)</code></td><td>提交响应：写入 HTTP 状态行 + 响应头 + 响应体到输出缓冲</td></tr>
+            <tr><td>㉑</td><td><code>CoyoteAdapter</code></td><td><code>response.finishResponse()</code></td><td>刷新输出缓冲，确保所有数据写入底层 Socket</td></tr>
+            <tr><td>㉒</td><td><code>Http11Processor</code></td><td><code>isKeepAlive(response)</code></td><td>Keep-Alive 判断：若满足则复用连接，否则标记关闭</td></tr>
+            <tr><td>㉓</td><td><code>NioEndpoint.Poller</code></td><td>重新注册 / closeSocket</td><td>复用：重新注册 OP_READ 等待下一个请求；关闭：释放 Socket 资源</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="label">关键洞察：三次跨线程交接</div>
+        <p>整个链路中有<strong>三次关键的跨线程交接</strong>：① Acceptor → Poller（通过事件队列 <code>poller.register()</code>）；② Poller → 工作线程池（通过 <code>executor.execute(SocketProcessor)</code>）；③ 响应回写后工作线程 → Poller（通过重新注册 OP_READ 或关闭 Socket）。理解这三处交接是分析 Tomcat 线程模型和性能瓶颈的核心。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="label">性能瓶颈定位</div>
+        <p>步骤 ⑯~⑰（FilterChain + Servlet）是<strong>唯一可能长时间阻塞工作线程</strong>的环节。如果业务代码中包含慢 SQL、RPC 调用或外部 HTTP 请求，工作线程将被阻塞在此处。当所有工作线程都被阻塞时，步骤 ⑦ 的任务提交将排队，最终导致 <code>acceptCount</code> 队列溢出，新连接被拒绝。调优时应优先关注此环节的阻塞时间，而非盲目增大 <code>maxThreads</code>。</p>
+      </div>
 
       <h3>4.2 CoyoteAdapter：连接器到容器的桥梁</h3>
 
