@@ -1043,7 +1043,7 @@ public class Connector extends LifecycleMBeanBase {
     protected void initInternal() throws LifecycleException {
 
         super.initInternal();
-
+        // 创建CoyoteAdapter（协议层 -> 容器层的适配器）
         // Initialize adapter
         adapter = new CoyoteAdapter(this);
         protocolHandler.setAdapter(adapter);

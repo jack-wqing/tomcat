@@ -1,0 +1,17 @@
+1、keepAliveTimeout 在 NIO 下如何实现？
+   NIO Selector + SocketWrapper + Poller超时机制检测的
+
+2、Spring Boot 内嵌 Tomcat 如何修改线程池？
+    第一种：从配置文件直接设置
+    第二种：提供TomcatWebServerFactoryCustomizer  直接设置线程池
+
+3、集成原理： Sprint Boot不需要外部Tomcat, 靠的是(自动装配 + Web占用上下文)，把Tomcat实例当普通Bean管理起来
+       1.ServletWebServerApplicationContext会找WebServerFactory
+       2.ServletWebServerFactoryAutoConfiguration自动扫描路径，tomcat-embed-core, 会找到
+         TomcatServletWebServerFactoryBean
+       3.TomcatWebServerFactoryCustomizer会应用配置
+       4.onFresh: factory.getWebServer(ServletContextInitializer)， 工厂内部new一个Tomcat
+        配置Connector-Engine-Host-Context, 并发DispatcherServer注册进去
+       5.工厂返回TomcatWebServer
+       6.finishRefresh: 触发TomcatWebServer.start() -> TomcatStart
+

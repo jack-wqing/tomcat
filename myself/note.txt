@@ -1,0 +1,390 @@
+一、Tomcat 8.5 整体架构
+    Tomcat8.5的核心设计哲学是【连接器 + 容器】的分离架构， Connector负责接收网络请求(I/O通信、协议解析)
+    Container负责处理业务请求(路由分发、Servlet调用)，二者通过CoyoteAdapter桥接，使得同一个Container可以对接不同的协议和I/O模型
+    1.1 核心组件层级
+        Tomcat的组件遵循严格的父子层级关系，自顶而下为 server -> Service -> Connector / Engine -> Host -> Context -> Wrapper。每一层都有对应的Standard*实现类
+        组件          核心实现类               职责                       数量关系
+        Server      StandardServer     Tomcat实例顶层组件，管理生命周期     整个JVM 1个
+        Service     StandardService    将多个Connector和一个Engine组合    1 Server 可含多个
+        Connector   Connector          网络I/O与协议处理                 1 Service 可含多个
+        Engine      StandardEngine     全局Servlet引擎，处理所有请求       1 Service 恰好一个
+        Host        StandardHost       虚拟主机，按域名路由               1 Engine 可含多个
+        Context     StandardHost       一个Web应用(WAR)                 1 Host 可含多个
+        Wrapper     StandardWrapper    一个Servlet实例                  1 Context 可含多个
+    1.2 组件架构图
+                               StandardServer
+                                     |
+                              StandardService(Catalina)
+                           |                   |
+                     Connector(NIO)      Connector(APR)
+                           |                   |
+                     CoyoteAdapter       CoyoteAdapter
+                           |                   |
+                              StandardEngine(Catalina)
+        -----------------------------------------------------------------------
+            StandardHost(api.example.com)  |       StandardHost(localhost)
+            ---------------------------------------------------------------------
+                StandardContext:/api       | StandardContext:/app2 | StandardContext:/app1
+                -------------------------------------------------------------------------------------------
+                                           | Wrapper: ServletC     | WrapperA:ServletA | Wrapper:ServletB
+
+    1.3 Server.xml 与 组件映射
+        <!-- Server: 顶层组件， port为ShutDown端口 -->
+        <Server port="8005" shutdown="SHUTDOWN">
+          <Service name="Catalina">
+            <!-- Connector: NIO 连接器，处理HTTP, 配置port, protocol, maxThread, minSpareThreads(预热线程), acceptCount, connectionTimeout -->
+            <Connector port="8080" protocol="org.apache.coyote.http11.Http11NioProtocol"
+                       maxThreads="200" minSpareThreads="10"
+                       acceptCount="100" connectionTimeout="20000" />
+            <!-- Connector: AJP 连接器(用于反代) port, protocol, redirectPort-->
+            <Connector port="8009" protocol="AJP/1.3" redirectPort="8443" />
+            <!-- Engine: Servlet 引擎 name, defaultHost -->
+            <Engine name="Catalina" defaultHost="localhost">
+              <Host name="localhost" appBase="webapps"
+                    unpackWARs="true" autoDeploy="true" />
+            </Engine>
+          </Service>
+        </Server>
+        配置文件中每个xml元素在启动时由Digester框架解析，通过规则映射到对应的Standard*对象，并建立父子关系。例如：解析到
+        <Connector>时会创建Connector对象并添加到Service中
+
+    1.4 生命周期管理：Lifecycle接口
+        所有核心组件通过Lifecycle接口统一管理启动、停止等状态转换。Tomcat通过LifecycleBase抽象类提供模版方法模式，子类只需要实现 startInterval()/stopInterval()等方法
+
+二、Connector连接器架构与源码
+    2.1 三层架构
+        Connector承担网络I/O接收、协议处理、请求转发三大职责; 内部三层架构:
+            ProtocolHandler -> Endpoint -> Processor
+
+                            客户端
+                              |
+                        ProtocolHandler
+        Endpoint(I/O层): Acceptor接收线程（register（socketWrapper））
+                         Poller轮训线程(read ready -> dispatcher)
+                         SocketProcessor(工作线程)（handler.process()）
+                         Processor(协议处理器)（adapter.service(req,resp）
+                         CoyoteAdapter(适配器)(Engine.getPipeline)
+                              |
+                         Container
+
+        ProtocolHandler: 组合Endpoint + Processor, 管理连接超时，协议升级
+        Endpoint: 底层I/O操作：接收连接、事件轮询、线程池管理
+        Processor: http11Processor: 解析HTTP请求头，生成CoyoteRequest/Response
+
+    2.2 I/O 模型对比
+       I/O模型   Protocol配置值          Endpoint类         线程模型                    适用场景
+        NIO     Http11NioProtocol      NioEndpoint   Acceptor + Poller(Selector)  通用场景(默认推荐)
+        NIO2    Http11Nio2Protocol     Nio2Endpoint   异步回调 (AIO)                异步Servlet3.2场景
+        APR     http11AprProtocol      AprEndpoint   Native(c) Poll                高并发静态资源、需要原生性能
+
+
+    2.3NioEndpoint源码深度分析
+        NioEndpoint是NIO模型的核心，内部通过Acceptor、Poller、SocketProcessor三个角色协作完成请求接收与处理
+        Acceptor接收到连接事件配置SocketChannel之后注册到Poller,Poller检测到读事件，提交给工作线程；工作线程在通过Http11Processor解析请求，通过Adapter转发给Container
+
+        Poller注册Read, Connector指定的线程执行SocketProcessor
+
+        SocketProcessor -> ConnectionHandler.processor -> Http11Processor.service
+
+        说明: Http11Protocol(处理器，每个连接一个) Coyote Request/Response
+
+        CoyoteAdapter: 把底层网络解析出来的CoyoteAdapter：Request和Response，封装、转换、适配成
+                       Servlet规范的RequestFacade/ResponseFacade, 交给容器的流水线(Valve执行)
+
+
+三、Container容器架构与Pipeline-Valve源码
+    Container是Tomcat的请求处理引擎，采用四级嵌套结构：Engine->Host->Context->Wrapper
+    每一级容器通过Pipeline-Value管道模式实现请求的逐层下发
+    3.1 四层结构
+        Http请求：GET /app1/servletA
+        StandardEngine:Pipeline -> StandardEngineValve(BasicValve)
+        Host:Pipeline -> StandardHostValve(BasicValve)
+        Context: Pipeline -> StandardContextValve（BasicValve）
+        Wrapper: Pipeline -> StandardWrapperValue(Basic)
+                          -> ApplicationFilterChain
+                          -> Servlet.service()
+
+    3.2 Pipeline-Valve管道机制
+        每个容器都持有一个Pipeline实例，Pipeline内部维护一个Valve链表。请求处理时，从第一个Valve开始
+        依次调用invoke(), 每个Valve可以在请求处理前后插入自定义逻辑(如日志、认证)。最后由BasicValue负责将请求路由到下一级容器
+        Pipeline: getBasic, getFirst
+        Valve: invoke(request, response), getNext
+        Pipeline-Valve模式本质是责任链的变体，自定义Valve和BasicValve之前，通过getNext.invoke()传递控制权
+        BasicValve永远是结尾，负责路由到子容器。这种设计让日志、认证、限流等横切关注点可以通过配置灵活插拔，无需修改核心代码
+
+    ** Request对象的MappingData在CoyoteAdapter的service方法中通过Service中的Mapper映射详细的信息
+       映射全靠Service下的Mapper组件
+
+    3.3 StandardEngineValve：路由到Host
+        选择原理: MappingData 直接存储
+    3.4 StandardHostValve: 路由到Context
+        选择原理：MappingData 直接存储
+    3.5 StandardContextValve: 路由到Wrapper
+        选择原理： MappingData 直接存储
+    3.6 StandardWrapperValve: 调用Servlet
+        StandardWrapperValve是最关键的一环，负责 加载Servlet实例、构造FilterChain、执行过滤器链、调用Servlet
+    3.7 ApplicationFilterChain: 过滤器链 + Servlet调用
+        Filter是以Pos递增访问Filter列表
+        最后调用interDoFilter -> Servlet.service
+    Filter 和 Servlet 的调用本质是递归调用。FilterChain.doFilter在Filter内部被在再次调用，
+    请求 -> Filter1 -> Filter2 -> Servlet -> Filter2 -> Filter1->响应； 与Spring Interceptor的机制完全一致
+
+四、请求处理全链路源码分析
+    4.1 完整调用链路图
+        请求阶段15步 + 响应阶段6步：21个关键环节
+        按线程上下文分为四个泳道：Accepter线程 -▶ Poller线程 -▶ 工作线程 -▶ 响应回写
+          Acceptor 线程：接受请求、配置非阻塞，非延迟，soTimeout、配置keepAlive+readTimeOut、Poller.register(Wrapper)注册到Poller
+          Poller线程Selector: events刷新设计注册Selector、selector.select检测Socket读就绪、ProcessKey处理任务
+          工作线程：executor.execute(SocketProcessor)、SocketProcessor.doRun()+handler.process(wrapper, OPEN_READ)
+                  ConnectionHandler.process()从回收栈获取或新建 Processor、Http11Processor.service()
+                  CoyoteAdapter.service()、postParseRequest()URL 解码 + Mapper.map()路由 Host → Context → Wrapper
+                  Engine Pipeline.invoke()EngineValve → HostValve、Host/Context PipelineHostValve → ContextValve
+                  StandardWrapperValve.invoke()allocate Servlet + 构建 FilterChain、ApplicationFilterChain.doFilter() Filter1 → Filter2 → ... → FilterN
+                  Servlet.service(req, resp)业务逻辑执行
+        响应回写阶段
+               FilterChain 逆序返回各 Filter 后置处理
+               WrapperValve.deallocate(servlet)释放 Servlet 实例（这里区分是单利还是非单利，非单利则销毁）
+               Http11Processor 输出响应action(COMMIT) → 写状态行/头/体
+               CoyoteAdapter.finishResponse()刷新输出缓冲
+               Keep-Alive 判断复用连接 or 关闭 Socket
+               Poller 重新注册 OP_READ或 closeSocket()
+        性能瓶颈：
+            FilterChain + Servlet 是唯一可能长时间阻塞工作线程的环节；工作线程都被阻塞时，poller可读事件触发提交工作线程会阻塞
+            最终导致acceptCount队列溢出。新链接被拒绝；调优时应先关注此环节的阻塞时间，而非盲目增大maxThreads
+            TaskQueue: 先扩充线程在达到最大在进入队列
+    4.2 CoyoteAdapter: 连接器到容器的桥梁
+           CoyoteAdapter是Connector与Container之间的适配器，负责将Coyote协议层的org.apache.coyote.Request转为Catalina层的
+            org.apache.catalina.connector.Request, 并触发Container管道
+
+    4.3 Mapper: 请求路由表
+        Mapper在Tomcat启动的时根据web.xml配置和已部署的web应用构建一张三级路由表：Host名->Context路径->Wrapper映射
+            请求到达时通过精确匹配 + 通配符匹配定位到目标Servlet
+
+    4.4 线程模型总结
+        线程类型          数量                      职责                           是否阻塞
+       Acceptor          1                     接收TCP连接                      阻塞在accept()
+       Poller            1                     NIO Selector轮询 I/O 事件        阻塞再select(timeout)
+       工作线程     minSpareThreads - maxThreads  执行请求处理(解析->路由->Servlet) 阻塞在Servlet执行
+
+    工作线程池是瓶颈所在，一旦工作线程都在阻塞等待，新请求将在acceptCount队列中排队，超出后直接拒绝连接
+    自己在Server.xml配置Executor使用的时Tomcat的 org.apache.catalina.core.StandardThreadExecutor
+
+五、Tomcat 8.5性能调优
+    性能调优需要从连接器层、线程池层、JVM层、应用层四个维度系统性展示；关键参数及推荐配置
+    5.1 连接器调优
+        Connector 参数直接控制Tomcat的网络吞吐能力。核心参数
+        参数             默认值            说明                   调优建议
+       maxThread         200           工作线程池最大线程池收      cpu:200-400 I/O:500-1000
+       minSpareThreads   10            最小空闲线程(预热)         设置maxThreads的10-20%
+       acceptCount       100           连接队列(backlog)长度     略大于maxThreads: 200-500    // backlog 指的已经完成握手，等待accept队列，超出就是connection refused
+       maxConnections    8 * 1024      最大同时连接数            NIO默认通常沟通
+
+       connectionTimeout 20000(20s)    连接超时(ms)              内外可降到10s, 避免空连接占用    // tomcat 设置的时ReadTimeout(表示连接建立 等待请求数据的时间)
+       keepAliveTimeout  =connectionTimeout   keep-Alive空闲时间 设置15-30s,平衡复用与资源释放    // 连接完成读写后保存的时间
+       maxKeepAliveRequests 100        单连接最大请求数           设置为100-200；静态资源可设更大
+
+       tcpNoDelay        true          禁用 Nagle算法            保持true, 降低延迟
+       compression       off           HTTP响应压缩              on(文本资源)；注意CPU开销
+       compressionMinSize 2048         触发压缩的最小响应大小       1024-2048
+       disableUploadTimeout true       上传是否使用独立超时        大文件上传设为false     // 是否使用独立的上传超时时间 connectionUploadTimeout
+
+    生成环境推荐配置：
+        max=500 min=50 acceptCount=200 maxConn=10000
+        connectionTime=15s keepAlive=15s keepAlvieCount=100
+        tcpNoDelay compression disableUploadTime
+
+    线程池调优(Executor)
+        Tomcat支持通过<Executor>配置共享线程池，多个Connector可以复用同一个线程池。相比Connector中各自配置maxThreads,控制更加精细
+        Executor: max=500, min=50, maxIdleTime=60s, maxQueueSize="100" rejectionPolicy="CallerRunPolicy"
+
+    JVM调优：
+        JVM参数在bin/setenv.sh中配置，核心关注堆内存、GC策略、元空间
+        推荐JVM参数：
+            # === 堆内存 ===
+            JAVA_OPTS="$JAVA_OPTS -Xms4g -Xmx4g"
+            # 初始堆与最大堆设为相同值，避免动态扩容导致 Full GC
+
+            # === 元空间（替代永久代） ===
+            JAVA_OPTS="$JAVA_OPTS -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
+
+            # === 年轻代大小 ===
+            JAVA_OPTS="$JAVA_OPTS -XX:NewSize=1g -XX:MaxNewSize=1g"
+            # 年轻代约为堆的 1/3 ~ 1/2
+
+            # === GC 策略：G1GC（推荐 JDK8u40+） ===
+            JAVA_OPTS="$JAVA_OPTS -XX:+UseG1GC"
+            JAVA_OPTS="$JAVA_OPTS -XX:MaxGCPauseMillis=200"
+            JAVA_OPTS="$JAVA_OPTS -XX:G1HeapRegionSize=16m"
+            JAVA_OPTS="$JAVA_OPTS -XX:+ParallelRefProcEnabled"
+            JAVA_OPTS="$JAVA_OPTS -XX:+UseStringDeduplication"
+
+            # === GC 日志（排查必备） ===
+            JAVA_OPTS="$JAVA_OPTS -XX:+PrintGCDetails"
+            JAVA_OPTS="$JAVA_OPTS -XX:+PrintGCDateStamps"
+            JAVA_OPTS="$JAVA_OPTS -Xloggc:/data/logs/tomcat/gc.log"
+            JAVA_OPTS="$JAVA_OPTS -XX:+UseGCLogFileRotation"
+            JAVA_OPTS="$JAVA_OPTS -XX:NumberOfGCLogFiles=10"
+            JAVA_OPTS="$JAVA_OPTS -XX:GCLogFileSize=50M"
+
+            # === OOM 时自动 dump ===
+            JAVA_OPTS="$JAVA_OPTS -XX:+HeapDumpOnOutOfMemoryError"
+            JAVA_OPTS="$JAVA_OPTS -XX:HeapDumpPath=/data/logs/tomcat/dump/"
+
+            # === 直接内存（NIO Buffer） ===
+            JAVA_OPTS="$JAVA_OPTS -XX:MaxDirectMemorySize=512m"
+
+            # === 其他 ===
+            JAVA_OPTS="$JAVA_OPTS -Djava.awt.headless=true"
+            JAVA_OPTS="$JAVA_OPTS -Dfile.encoding=UTF-8"
+            JAVA_OPTS="$JAVA_OPTS -Duser.timezone=Asia/Shanghai"
+            JAVA_OPTS="$JAVA_OPTS -server"
+
+        Parallel GC   jdk8 默认    批处理，低交互
+        CMS           jdk8 可选    低停顿，碎片化，web应用(已废弃)
+        G1 GC         jdk9默认     可控停顿，Region话    jdk8推荐替代CMS
+
+    5.4 堆内存分配策略
+        4G=1G+3G    meta=512m  directSize=512
+        调优原则：
+            xmx=xms 避免动态扩缩引起的FullGC
+            年轻代占堆的1/3-1/2: 减少对象过早晋升老年代
+            监控GC频率：MinorGC 应 < 5次/分钟， FullGC应 < 1次/小时
+            G1Region大小: 4G->16M  8G->32M
+
+    5.5 关闭自动部署
+        关闭 autoDeploy 和 unpackWARs,减少运行开销
+
+六、调优实战与监控
+   常见问题：
+      问题 1：响应变慢，CPU 使用率低
+      回答：通常是业务阻塞，线程池数量较少
+      问题 2：连接被拒绝（Connection Refused）
+      回答：服务器可承受控制acceptCount, 或前段限流
+      问题 3：频繁 Full GC
+      回答：堆太小， 年轻代太小，内存泄露(ThreadLocal, 静态集合，Session未过期)
+      问题 4：OOM: Direct buffer memory
+      回答：调整直接内容，是不是大文件上传
+
+   调优方向： I/O模型， 连接器层， 线程池，JVM, 应用自动部署关闭
+
+七、Tomcat 8.5 启动过程架构和源码
+    Tomcat的启动过程是一个自顶向下的级联过程：从Bootstrap.main()入口开始，经过类加载器初始化、server.xml解析、组件级联init()和start(), 最终进入await()阻塞等待关闭命令
+    7.1 启动全局视角
+        Tomcat启动分为四大阶段: 类加载器初始化 -> 配置加载(Digester 解析 server.xml) -> 组件级联初始化 -> 组件级联启动；
+        整个流程涉及Bootstrap、Catalina、StandardServer三个核心类的协作
+        阶段一：类加载器初始化
+            Bootstrap.main() --> init()创建三类ClassLoader -> loadCatalina()反射加载Catalina实例
+        阶段二：配置加载
+            Catalina.load() --> Digester 解析 server.xml --> 创建 Server/Service/Connector/Engine/Host -> Server.init()级联初始化所有组件
+        阶段三：级联启动
+            Catalina.start() --> Server.start()级联启动所有组件 --> Connector启动：Acceptor + Poller线程 --> 部署Web应用 HostConfig->ContextConfig
+        阶段四：运行等待
+            Catalina.await()阻塞等待关闭 -> 收到 SHUTDOWN catalina.stop()
+    7.3 类加载器
+        JVM Bootstrap ClassLoader
+        System ClassLoader
+        Common ClassLoader($CATALINA_HOME/lib)
+        Catalina ClassLoader（Tomcat内部类）  Shared ClassLoader（共享第三方库）
+                                             Web 应用 B             Web 应用 A
+                                             WebAppClassLoader B   WebAppClassLoaderA
+                                             WEB-INF/classes + lib WEB-INF/classes + lib
+        WebAppClassLoader打破了双亲委派模型：加载时优先 WBE-INF/classes 和 WEB-INF/lib查找
+        找不到才会委派给父加载器，但JVM核心类(java.*)仍走双亲委派；Web应用可以使用不同版本的同一三方库
+
+    7.4 Catalina类：配置加载与启动控制
+        Catalina类是Tomcat启动的实际控制者。它的load方式使用Digester框架解析server.xml, 将xml配置转换为Java对象
+
+    7.5 Digester: Server.xml到对象树的映射
+        Digester是Apache Commons项目的Xml 解析架构，Tomcat用它将Server.mxl转换为Java对象树。核心机制是规则匹配：
+        为每个XML元素路径注册一组Rule, 当SAX解析器遇到匹配的元素时触发对应规则
+
+    7.6 生命周期初始化：init()级联
+        Server.init()触发自顶向下的级联初始化。由于所有组件都继承LifecycleBase,init方法采用模版方式:
+            先执行状态转换和事件通知，在调用子类实现的initInternal().
+        Server.init() -> StandardServer.initInterval()
+        Service.init() -> StandardService.initInterval()
+            Engine.init()/StandardEngin.initInterval()
+                -> Host.init()/StandardHost.initInterval()
+                    -> Context.init()/StandardContext.initInterval()
+            Connector.init()/Connector.initInterval()
+                -> ProtocolHandler.init()/Http11NioProtocol.init
+                    -> Endpoint.init()/NioEndpoint.initInterval() 创建ServerSocketChannel
+    7.7 生命周期启动：start级联
+        Server.start()触发自顶向下的级联启动，与init()不同，start()阶段会启动工作线程、
+        Acceptor线程、Poller线程，并触发Web应用的部署和初始化
+        StandardServer.startInterval()
+        StandardService.startInterval()
+            StandardEngine.startInterval()
+            executor.start()
+            MapperListener.start()
+            Connector.start()
+                ProtocolHandler.start()
+                Endpoint.start()
+        init()阶段只创建和绑定ServerSocketChannel，不启动任何线程。start()阶段才启动Acceptor线程(开始接收连接)
+        Poller线程(开始处理I/O事件)。 server.xml解析完成到start之前，Tomcat尚未监听任何端口
+
+    7.8 Web应用部署：HostConfig与ContextConfig
+        在Engine/Host启动阶段，Tomcat通过HostConfig（生命周期监听器）自动扫描webapp目录并部署Web应用。
+        每个Web引用的初始化由ContextConfig完成，包括解析web.xml、创建Servlet、Filter、Listener
+        Host.start() 触发 Configure_start_event
+            HostConfig.lifecycleEvent 检测到启动事件
+                deployApps扫描 webapps目录：解析WAR文件，解析Context.xml, 扫描目录结构
+                    创建StandardContext:addChild到Host
+                        ContextStart触发ContextConfig
+                            ContextConfig.lifecycleEvent:Configure_start_event
+                            解析 Web.xml web-fragment.xml
+                            创建FilterDef/FilterMap + 创建Wrapper(封装Servlet) + 注册Listener
+                            Litener.contextInitialized: Servlet.init()(loadOnStartup)
+
+                    ** ServletContainerInitializer机制
+
+    7.9 启动完成与await阻塞
+       所有组件 start()完成后，Catalina.start()调用Catalina.await(),该方法内部调用Server.await()
+       阻塞当前线程等待关闭指令
+       Server关闭是通过制定的关闭端口：发送制定的关闭指令进行线程退出
+       停止: Catalina.start()继续执行stop（）。stop调用Server.stop
+       触发自底向上的级联停止：先停止Connector(停止接收新请求).
+       再停Context/Host/Engine（销毁Servlet）,最后释放资源
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

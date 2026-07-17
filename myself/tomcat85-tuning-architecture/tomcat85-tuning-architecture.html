@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tomcat 8.5 调优与架构源码深度解析</title>
+  <title>Tomcat 8.5 调优、架构源码与启动流程深度解析</title>
 
   <style>
     @font-face {
@@ -57,8 +57,14 @@
       padding: 0;
     }
 
-    /* === Layout === */
-    .page { max-width: var(--max); margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+    /* === Layout: 双栏 (左侧 TOC + 右侧内容) === */
+    .layout {
+      display: flex;
+      max-width: 1280px;
+      margin: 0 auto;
+      gap: 0;
+    }
+    .page { flex: 1; min-width: 0; max-width: var(--max); margin: 0 auto; padding: 2rem 1.5rem 4rem; }
 
     /* === Hero === */
     .hero {
@@ -86,21 +92,42 @@
       color: var(--accent); font-size: 0.78rem; font-weight: 600;
     }
 
-    /* === TOC === */
+    /* === TOC 侧边栏 === */
     .toc {
+      width: 260px;
+      flex-shrink: 0;
       background: var(--bg2);
-      border: 1px solid var(--rule);
-      border-radius: 8px;
-      padding: 1.5rem 2rem;
-      margin: 2rem 0 3rem;
+      border-right: 1px solid var(--rule);
+      padding: 2rem 1.25rem 2rem 1.5rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      box-sizing: border-box;
     }
-    .toc h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); margin-bottom: 0.75rem; }
-    .toc ol { padding-left: 1.5rem; }
-    .toc li { margin-bottom: 0.3rem; font-size: 0.92rem; }
-    .toc a { color: var(--ink); text-decoration: none; transition: color 0.2s; }
-    .toc a:hover { color: var(--accent); }
-    .toc .sub { padding-left: 1.2rem; font-size: 0.85rem; color: var(--muted); }
-    .toc .sub a { color: var(--muted); }
+    .toc::-webkit-scrollbar { width: 4px; }
+    .toc::-webkit-scrollbar-track { background: transparent; }
+    .toc::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
+    .toc h2 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); margin-bottom: 1rem; border: none; padding: 0; display: block; }
+    .toc ol { list-style: none; padding-left: 0; margin: 0; }
+    .toc li { margin-bottom: 0.35rem; font-size: 0.88rem; }
+    .toc a {
+      color: var(--muted); text-decoration: none; transition: all 0.2s;
+      display: block; padding: 0.35rem 0.75rem; border-radius: 6px;
+      border-left: 2px solid transparent; line-height: 1.4;
+    }
+    .toc a:hover { color: var(--accent); background: rgba(56,189,248,0.08); }
+    .toc a.active {
+      color: var(--accent); font-weight: 600;
+      background: rgba(56,189,248,0.12);
+      border-left: 2px solid var(--accent);
+    }
+    .toc .toc-num {
+      display: inline-block; width: 1.5rem; text-align: right;
+      color: var(--accent2); font-family: var(--font-mono); font-size: 0.78rem;
+      margin-right: 0.4rem; opacity: 0.7;
+    }
+    .toc a.active .toc-num { opacity: 1; }
 
     /* === Sections === */
     section { margin-bottom: 3.5rem; scroll-margin-top: 1rem; }
@@ -228,6 +255,14 @@
 
     /* === Responsive === */
     @media (max-width: 768px) {
+      .layout { flex-direction: column; }
+      .toc {
+        width: 100%; height: auto; position: relative; border-right: none;
+        border-bottom: 1px solid var(--rule); padding: 1.25rem 1rem; max-height: 280px;
+      }
+      .toc ol { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+      .toc li { margin-bottom: 0; }
+      .toc a { padding: 0.25rem 0.6rem; font-size: 0.82rem; }
       .page { padding: 1rem 0.75rem 3rem; }
       .hero { padding: 2.5rem 1rem 2rem; }
       .hero h1 { font-size: 1.6rem; }
@@ -240,8 +275,8 @@
 </head>
 <body>
   <div class="hero">
-    <h1>Tomcat 8.5 调优与架构源码深度解析</h1>
-    <p class="subtitle">从整体架构到请求处理全链路源码，从连接器模型到 JVM 级性能调优的完整技术指南</p>
+    <h1>Tomcat 8.5 调优、架构源码与启动流程深度解析</h1>
+    <p class="subtitle">从整体架构到启动流程源码，从请求处理全链路到 JVM 级性能调优的完整技术指南</p>
     <div class="meta">
       <span class="tag">Tomcat 8.5.x</span>
       <span>架构源码 + 性能调优</span>
@@ -249,20 +284,22 @@
     </div>
   </div>
 
-  <article class="page">
-    <!-- TOC -->
-    <nav class="toc">
-      <h2>目录</h2>
+  <div class="layout">
+    <!-- TOC 侧边栏 -->
+    <nav class="toc" id="sidebar-toc">
+      <h2>目录导航</h2>
       <ol>
-        <li><a href="#ch1">Tomcat 8.5 整体架构</a></li>
-        <li><a href="#ch2">Connector 连接器架构与源码</a></li>
-        <li><a href="#ch3">Container 容器架构与 Pipeline-Valve 源码</a></li>
-        <li><a href="#ch4">请求处理全链路源码分析</a></li>
-        <li><a href="#ch5">Tomcat 8.5 性能调优</a></li>
-        <li><a href="#ch6">调优实战与监控</a></li>
+        <li><a href="#ch1"><span class="toc-num">1</span>Tomcat 8.5 整体架构</a></li>
+        <li><a href="#ch2"><span class="toc-num">2</span>Connector 连接器架构与源码</a></li>
+        <li><a href="#ch3"><span class="toc-num">3</span>Container 容器与 Pipeline-Valve</a></li>
+        <li><a href="#ch4"><span class="toc-num">4</span>请求处理全链路源码分析</a></li>
+        <li><a href="#ch5"><span class="toc-num">5</span>Tomcat 8.5 性能调优</a></li>
+        <li><a href="#ch6"><span class="toc-num">6</span>调优实战与监控</a></li>
+        <li><a href="#ch7"><span class="toc-num">7</span>启动过程架构与源码</a></li>
       </ol>
     </nav>
 
+  <article class="page">
     <!-- ==================== Chapter 1 ==================== -->
     <section id="ch1">
       <h2><span class="num">1</span> Tomcat 8.5 整体架构</h2>
@@ -1495,6 +1532,1044 @@ JAVA_OPTS="$JAVA_OPTS -Djava.rmi.server.hostname=10.0.0.1"</code></pre>
       </div>
     </section>
 
+    <!-- ==================== Chapter 7 ==================== -->
+    <section id="ch7">
+      <h2><span class="num">7</span> Tomcat 8.5 启动过程架构与源码</h2>
+
+      <p>Tomcat 的启动是一个<strong>自顶向下的级联过程</strong>：从 <code>Bootstrap.main()</code> 入口开始，经过类加载器初始化、<code>server.xml</code> 解析、组件级联 <code>init()</code> 和 <code>start()</code>，最终进入 <code>await()</code> 阻塞等待关闭指令。理解启动流程是掌握 Tomcat 运行机制的基础。</p>
+
+      <h3>7.1 启动全局视角</h3>
+
+      <p>Tomcat 的启动可分为<strong>四大阶段</strong>：类加载器初始化 → 配置加载（Digester 解析 server.xml）→ 组件级联初始化 → 组件级联启动。整个流程涉及 <code>Bootstrap</code>、<code>Catalina</code>、<code>StandardServer</code> 三个核心类的协作。</p>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+graph TD
+    subgraph Phase1["阶段一：类加载器初始化"]
+        B1["Bootstrap.main()"]
+        B2["init()\n创建三类 ClassLoader"]
+        B3["loadCatalina()\n反射加载 Catalina 实例"]
+    end
+
+    subgraph Phase2["阶段二：配置加载"]
+        C1["Catalina.load()"]
+        C2["Digester 解析 server.xml"]
+        C3["创建 Server/Service/\nConnector/Engine/Host"]
+        C4["Server.init()\n级联初始化所有组件"]
+    end
+
+    subgraph Phase3["阶段三：级联启动"]
+        D1["Catalina.start()"]
+        D2["Server.start()\n级联启动所有组件"]
+        D3["Connector 启动\nAcceptor + Poller 线程"]
+        D4["部署 Web 应用\nHostConfig → ContextConfig"]
+    end
+
+    subgraph Phase4["阶段四：运行等待"]
+        E1["Catalina.await()\n阻塞等待关闭"]
+        E2["收到 SHUTDOWN\nCatalina.stop()"]
+    end
+
+    B1 --> B2 --> B3 --> C1 --> C2 --> C3 --> C4
+    C4 --> D1 --> D2 --> D3 --> D4 --> E1 --> E2
+
+    style B1 fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    style B2 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style B3 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style C1 fill:#1e293b,stroke:#a78bfa,color:#e2e8f0
+    style C2 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style C3 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style C4 fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style D1 fill:#1e293b,stroke:#34d399,color:#e2e8f0
+    style D2 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style D3 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style D4 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style E1 fill:#1e293b,stroke:#fbbf24,color:#e2e8f0
+    style E2 fill:#334155,stroke:#f87171,color:#e2e8f0
+        </pre>
+        <figcaption>图 8：Tomcat 8.5 启动全局流程（四大阶段）</figcaption>
+      </figure>
+
+      <h3>7.2 启动入口：Bootstrap 类</h3>
+
+      <p><code>org.apache.catalina.startup.Bootstrap</code> 是 Tomcat 的 main 入口类，负责<strong>初始化类加载器</strong>、<strong>加载 Catalina 实例</strong>、<strong>委托启动/停止</strong>。它通过反射调用 <code>Catalina</code> 的方法，实现了类加载器隔离。</p>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.Bootstrap</span>
+<span class="kw">public final class</span> <span class="cls">Bootstrap</span> {
+
+    <span class="kw">private static final</span> Daemon daemon;
+
+    <span class="kw">public static void</span> <span class="fn">main</span>(String args[]) {
+        <span class="kw">if</span> (daemon == <span class="kw">null</span>) {
+            Bootstrap bootstrap = <span class="kw">new</span> <span class="cls">Bootstrap</span>();
+            <span class="kw">try</span> {
+                <span class="cmt">// 1. 初始化类加载器 + 加载 Catalina</span>
+                bootstrap.<span class="fn">init</span>();
+            } <span class="kw">catch</span> (Throwable t) {
+                t.<span class="fn">printStackTrace</span>();
+                <span class="kw">return</span>;
+            }
+            daemon = bootstrap;
+        }
+
+        <span class="kw">try</span> {
+            String command = <span class="str">"start"</span>;
+            <span class="kw">if</span> (args.length &gt; <span class="num-lit">0</span>) {
+                command = args[args.length - <span class="num-lit">1</span>];
+            }
+
+            <span class="kw">if</span> (command.equals(<span class="str">"startd"</span>)) {
+                args[args.length - <span class="num-lit">1</span>] = <span class="str">"start"</span>;
+                daemon.<span class="fn">load</span>(args);   <span class="cmt">// 2. 加载配置</span>
+                daemon.<span class="fn">start</span>();       <span class="cmt">// 3. 启动</span>
+            } <span class="kw">else if</span> (command.equals(<span class="str">"stopd"</span>)) {
+                args[args.length - <span class="num-lit">1</span>] = <span class="str">"stop"</span>;
+                daemon.<span class="fn">stop</span>();        <span class="cmt">// 停止</span>
+            } <span class="kw">else if</span> (command.equals(<span class="str">"start"</span>)) {
+                daemon.<span class="fn">load</span>(args);
+                daemon.<span class="fn">start</span>();
+                <span class="kw">if</span> (<span class="kw">null</span> == daemon.getServer()) {
+                    System.exit(<span class="num-lit">1</span>);
+                }
+            } <span class="kw">else if</span> (command.equals(<span class="str">"stop"</span>)) {
+                daemon.<span class="fn">stopServer</span>(args);
+            }
+        } <span class="kw">catch</span> (Throwable t) {
+            System.exit(<span class="num-lit">1</span>);
+        }
+    }
+}</code></pre>
+
+      <h4>Bootstrap.init() 核心逻辑</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.Bootstrap#init</span>
+<span class="kw">public void</span> <span class="fn">init</span>() <span class="kw">throws</span> Exception {
+
+    <span class="cmt">// 1. 设置 Catalina Home 和 Base 路径</span>
+    <span class="fn">setCatalinaHome</span>();
+    <span class="fn">setCatalinaBase</span>();
+
+    <span class="cmt">// 2. 初始化类加载器</span>
+    <span class="fn">initClassLoaders</span>();
+
+    <span class="cmt">// 3. 设置当前线程上下文类加载器为 catalinaLoader</span>
+    Thread.currentThread().<span class="fn">setContextClassLoader</span>(catalinaLoader);
+
+    <span class="cmt">// 4. 安全管理器</span>
+    <span class="kw">if</span> (System.getProperty(<span class="str">"java.security.manager"</span>) != <span class="kw">null</span>) {
+        System.setProperty(<span class="str">"org.apache.catalina.security.SecurityListener.etc"</span>,
+            System.getProperty(<span class="str">"catalina.base"</span>) + <span class="str">"/conf"</span>);
+    }
+
+    <span class="cmt">// 5. 通过反射加载 Catalina 类并用 catalinaLoader 实例化</span>
+    Class&lt;?&gt; startupClass = catalinaLoader.<span class="fn">loadClass</span>(
+        <span class="str">"org.apache.catalina.startup.Catalina"</span>);
+    Object startupInstance = startupClass.<span class="fn">newInstance</span>();
+
+    <span class="cmt">// 6. 设置 Catalina 的 parentClassLoader 为 sharedLoader</span>
+    String methodName = <span class="str">"setParentClassLoader"</span>;
+    Class&lt;?&gt; paramTypes[] = <span class="kw">new</span> Class[<span class="num-lit">1</span>];
+    paramTypes[<span class="num-lit">0</span>] = Class.forName(<span class="str">"java.lang.ClassLoader"</span>);
+    Object paramValues[] = <span class="kw">new</span> Object[<span class="num-lit">1</span>];
+    paramValues[<span class="num-lit">0</span>] = sharedLoader;
+    Method method = startupInstance.getClass().<span class="fn">getMethod</span>(methodName, paramTypes);
+    method.<span class="fn">invoke</span>(startupInstance, paramValues);
+
+    <span class="cmt">// 保存 Catalina 实例</span>
+    catalinaDaemon = startupInstance;
+}</code></pre>
+
+      <h3>7.3 类加载器架构</h3>
+
+      <p>Tomcat 自定义了一套类加载器体系，核心目标是<strong>实现 Web 应用之间的类隔离</strong>和<strong>热部署</strong>。这与 JVM 默认的双亲委派模型有重要区别。</p>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+graph TD
+    JVM["JVM Bootstrap ClassLoader\n(rt.jar / java.lang.*)"]
+    SYS["System ClassLoader\n(CLASSPATH / startup.jar)"]
+
+    subgraph Tomcat["Tomcat 自定义类加载器"]
+        COM["Common ClassLoader\n($CATALINA_HOME/lib)"]
+        CAT["Catalina ClassLoader\n(Tomcat 内部类)"]
+        SHA["Shared ClassLoader\n(共享第三方库)"]
+
+        subgraph WebApp1["Web 应用 A"]
+            WA1["WebAppClassLoader A\n(WEB-INF/classes + lib)"]
+        end
+        subgraph WebApp2["Web 应用 B"]
+            WA2["WebAppClassLoader B\n(WEB-INF/classes + lib)"]
+        end
+    end
+
+    JVM --> SYS --> COM
+    COM --> CAT
+    COM --> SHA
+    SHA --> WA1
+    SHA --> WA2
+
+    style Tomcat fill:#1e293b,stroke:#a78bfa,color:#e2e8f0
+    style COM fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style CAT fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style SHA fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style WA1 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style WA2 fill:#334155,stroke:#34d399,color:#e2e8f0
+    style WebApp1 fill:#1e293b,stroke:#34d399,color:#e2e8f0
+    style WebApp2 fill:#1e293b,stroke:#34d399,color:#e2e8f0
+        </pre>
+        <figcaption>图 9：Tomcat 类加载器层级架构</figcaption>
+      </figure>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>类加载器</th><th>加载路径</th><th>父加载器</th><th>职责</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Common</strong></td><td><code>$CATALINA_HOME/lib</code></td><td>System</td><td>Tomcat 和所有 Web 应用共享的类</td></tr>
+            <tr><td><strong>Catalina</strong></td><td>Tomcat 内部类（从 Common 分割）</td><td>Common</td><td>Tomcat 自身实现类，对 Web 应用不可见</td></tr>
+            <tr><td><strong>Shared</strong></td><td>共享第三方库（从 Common 分割）</td><td>Common</td><td>所有 Web 应用共享的第三方库</td></tr>
+            <tr><td><strong>WebApp</strong></td><td><code>WEB-INF/classes</code> + <code>WEB-INF/lib</code></td><td>Shared</td><td>单个 Web 应用私有类，实现应用间隔离</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="label">WebAppClassLoader 的特殊设计</div>
+        <p>WebAppClassLoader <strong>打破了双亲委派模型</strong>：加载类时优先从 <code>WEB-INF/classes</code> 和 <code>WEB-INF/lib</code> 查找，找不到才委派给父加载器。但 JVM 核心类（<code>java.*</code>、<code>javax.*</code>）仍走双亲委派，防止应用覆盖 JDK 类。这种设计使得不同 Web 应用可以使用不同版本的同一第三方库。</p>
+      </div>
+
+      <h4>类加载器初始化源码</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.Bootstrap#initClassLoaders</span>
+<span class="kw">private void</span> <span class="fn">initClassLoaders</span>() {
+    <span class="kw">try</span> {
+        <span class="cmt">// 1. Common ClassLoader: 加载 $CATALINA_HOME/lib 下所有 jar</span>
+        commonLoader = <span class="fn">createClassLoader</span>(<span class="str">"common"</span>, <span class="kw">null</span>);
+        <span class="kw">if</span> (commonLoader == <span class="kw">null</span>) {
+            <span class="cmt">// 没有配置 common.loader → 使用 System ClassLoader</span>
+            commonLoader = <span class="kw">this</span>.getClass().getClassLoader();
+        }
+
+        <span class="cmt">// 2. Catalina ClassLoader: Tomcat 内部类（server.loader 配置）</span>
+        catalinaLoader = <span class="fn">createClassLoader</span>(<span class="str">"server"</span>, commonLoader);
+
+        <span class="cmt">// 3. Shared ClassLoader: 共享库（shared.loader 配置）</span>
+        sharedLoader = <span class="fn">createClassLoader</span>(<span class="str">"shared"</span>, commonLoader);
+    } <span class="kw">catch</span> (Throwable t) {
+        <span class="fn">handleThrowable</span>(t);
+        log.<span class="fn">sm</span>(<span class="str">"classLoader.create"</span>, t);
+        System.exit(<span class="num-lit">1</span>);
+    }
+}
+
+<span class="cmt">// 读取 catalina.properties 中的 *.loader 属性构建 URLClassLoader</span>
+<span class="kw">private static</span> ClassLoader <span class="fn">createClassLoader</span>(String name, ClassLoader parent) {
+    <span class="cmt">// 从 catalina.properties 读取 ${name}.loader 配置</span>
+    <span class="cmt">// e.g. common.loader=${catalina.base}/lib,${catalina.base}/lib/*.jar</span>
+    String value = CatalinaProperties.<span class="fn">getProperty</span>(name + <span class="str">".loader"</span>);
+    <span class="kw">if</span> (value == <span class="kw">null</span> || value.length() == <span class="num-lit">0</span>) {
+        <span class="kw">return</span> parent;  <span class="cmt">// 未配置则返回父加载器</span>
+    }
+    <span class="cmt">// 展开变量 + 构建类路径 URL 数组</span>
+    value = <span class="fn">replace</span>(value);
+    List&lt;URL&gt; list = <span class="kw">new</span> ArrayList&lt;&gt;();
+    <span class="cmt">// ... 解析路径为 URL ...
+</span>
+    <span class="kw">return</span> <span class="kw">new</span> <span class="cls">URLClassLoader</span>(array, parent);
+}</code></pre>
+
+      <h3>7.4 Catalina 类：配置加载与启动控制</h3>
+
+      <p><code>Catalina</code> 类是 Tomcat 启动的实际控制者。它的 <code>load()</code> 方法使用 <strong>Digester</strong> 框架解析 <code>server.xml</code>，将 XML 配置转换为 Java 对象树。</p>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.Catalina#load</span>
+<span class="kw">public class</span> <span class="cls">Catalina</span> {
+
+    <span class="kw">protected</span> Server server = <span class="kw">null</span>;
+
+    <span class="kw">public void</span> <span class="fn">load</span>() {
+        <span class="kw">if</span> (loaded) {
+            <span class="kw">return</span>;
+        }
+        loaded = <span class="kw">true</span>;
+
+        <span class="cmt">// 1. 初始化临时目录、JMX、命名服务</span>
+        <span class="fn">initDirs</span>();
+        <span class="fn">initNaming</span>();
+
+        <span class="cmt">// 2. 创建 Digester 并注册 server.xml 解析规则</span>
+        Digester digester = <span class="fn">createStartDigester</span>();
+
+        <span class="cmt">// 3. 读取 conf/server.xml</span>
+        InputSource inputSource = <span class="kw">null</span>;
+        FileInputStream inputStream = <span class="kw">null</span>;
+        <span class="kw">try</span> {
+            File file = <span class="kw">new</span> File(configFile);
+            <span class="kw">if</span> (!file.isAbsolute()) {
+                file = <span class="kw">new</span> File(System.getProperty(<span class="str">"catalina.base"</span>), configFile);
+            }
+            inputStream = <span class="kw">new</span> FileInputStream(file);
+            inputSource = <span class="kw">new</span> InputSource(file.toURI().toURL().toString());
+            inputSource.setByteStream(inputStream);
+            digester.<span class="fn">push</span>(<span class="kw">this</span>);  <span class="cmt">// 将 Catalina 实例压入栈顶</span>
+
+            <span class="cmt">// 4. 解析 XML → 创建 Server/Service/Connector/Engine 等对象</span>
+            digester.<span class="fn">parse</span>(inputSource);
+        } <span class="kw">catch</span> (Exception e) {
+            <span class="cmt">// 处理解析异常</span>
+        }
+
+        <span class="cmt">// 5. 设置 Server 的相关属性</span>
+        <span class="kw">if</span> (server.<span class="fn">getPort</span>() &gt; <span class="num-lit">0</span>) {
+            server.<span class="fn">setUtilityThreads</span>(<span class="fn">getUtilityThreads</span>());
+        }
+
+        <span class="cmt">// 6. 初始化 Server（级联 init）</span>
+        <span class="kw">try</span> {
+            getServer().<span class="fn">init</span>();
+        } <span class="kw">catch</span> (LifecycleException e) {
+            <span class="cmt">// ...</span>
+        }
+    }
+
+    <span class="cmt">// 启动方法</span>
+    <span class="kw">public void</span> <span class="fn">start</span>() {
+        <span class="kw">if</span> (getServer() == <span class="kw">null</span>) {
+            <span class="fn">load</span>();  <span class="cmt">// 确保已加载</span>
+        }
+        <span class="kw">if</span> (getServer() == <span class="kw">null</span>) {
+            log.<span class="fn">fatal</span>(<span class="str">"Cannot start server. Server instance is not configured."</span>);
+            <span class="kw">return</span>;
+        }
+
+        <span class="kw">try</span> {
+            <span class="cmt">// 级联启动所有组件</span>
+            getServer().<span class="fn">start</span>();
+        } <span class="kw">catch</span> (LifecycleException e) {
+            <span class="cmt">// ...</span>
+        }
+
+        <span class="kw">if</span> (useShutdownHook) {
+            <span class="cmt">// 注册 JVM ShutdownHook，确保进程退出时优雅关闭</span>
+            <span class="kw">if</span> (shutdownHook == <span class="kw">null</span>) {
+                shutdownHook = <span class="kw">new</span> <span class="cls">CatalinaShutdownHook</span>();
+            }
+            Runtime.getRuntime().<span class="fn">addShutdownHook</span>(shutdownHook);
+        }
+
+        <span class="kw">if</span> (await) {
+            <span class="cmt">// 阻塞等待关闭指令</span>
+            <span class="fn">await</span>();
+            <span class="fn">stop</span>();
+        }
+    }
+}</code></pre>
+
+      <h3>7.5 Digester：server.xml 到对象树的映射</h3>
+
+      <p><code>Digester</code> 是 Apache Commons 项目的 XML 解析框架，Tomcat 用它将 <code>server.xml</code> 转换为 Java 对象树。核心机制是<strong>规则匹配</strong>：为每个 XML 元素路径注册一组 Rule，当 SAX 解析器遇到匹配的元素时触发对应规则。</p>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+graph LR
+    subgraph XML["server.xml"]
+        X1["&lt;Server&gt;"]
+        X2["&lt;Service&gt;"]
+        X3["&lt;Connector&gt;"]
+        X4["&lt;Engine&gt;"]
+        X5["&lt;Host&gt;"]
+    end
+
+    subgraph Rules["Digester 规则"]
+        R1["ObjectCreateRule\n→ new StandardServer()"]
+        R2["SetPropertiesRule\n→ setPort()/setShutdown()"]
+        R3["ObjectCreateRule\n→ new StandardService()"]
+        R4["SetNextRule\n→ server.addService()"]
+        R5["ObjectCreateRule\n→ new Connector()"]
+        R6["SetNextRule\n→ service.addConnector()"]
+    end
+
+    subgraph Objects["Java 对象树"]
+        O1["StandardServer"]
+        O2["StandardService"]
+        O3["Connector"]
+        O4["StandardEngine"]
+        O5["StandardHost"]
+    end
+
+    X1 --> R1 --> O1
+    X1 --> R2 --> O1
+    X2 --> R3 --> O2
+    X2 --> R4 --> O1
+    X3 --> R5 --> O3
+    X3 --> R6 --> O2
+    X4 --> O4
+    X5 --> O5
+
+    style XML fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    style Rules fill:#1e293b,stroke:#a78bfa,color:#e2e8f0
+    style Objects fill:#1e293b,stroke:#34d399,color:#e2e8f0
+        </pre>
+        <figcaption>图 10：Digester 规则匹配机制（XML → 对象树）</figcaption>
+      </figure>
+
+      <h4>Digester 规则注册源码</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.Catalina#createStartDigester</span>
+<span class="kw">protected</span> Digester <span class="fn">createStartDigester</span>() {
+    <span class="kw">long</span> t1 = System.currentTimeMillis();
+
+    <span class="cmt">// 1. 创建 Digester 实例，禁用校验</span>
+    Digester digester = <span class="kw">new</span> <span class="cls">Digester</span>();
+    digester.setValidating(<span class="kw">false</span>);
+    digester.setRulesValidation(<span class="kw">true</span>);
+
+    <span class="cmt">// 2. 注册 Server 元素的规则</span>
+    <span class="cmt">//    匹配路径 "Server"</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server"</span>,
+        <span class="str">"org.apache.catalina.core.StandardServer"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server"</span>, <span class="str">"setServer"</span>,
+        <span class="str">"org.apache.catalina.Server"</span>);
+
+    <span class="cmt">// 3. 注册 Service 元素的规则</span>
+    <span class="cmt">//    匹配路径 "Server/Service"</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service"</span>,
+        <span class="str">"org.apache.catalina.core.StandardService"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service"</span>, <span class="str">"addService"</span>,
+        <span class="str">"org.apache.catalina.Service"</span>);
+
+    <span class="cmt">// 4. 注册 Executor（共享线程池）</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service/Executor"</span>,
+        <span class="str">"org.apache.catalina.core.StandardThreadExecutor"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service/Executor"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service/Executor"</span>, <span class="str">"addExecutor"</span>,
+        <span class="str">"org.apache.catalina.Executor"</span>);
+
+    <span class="cmt">// 5. 注册 Connector</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service/Connector"</span>,
+        <span class="str">"org.apache.catalina.connector.Connector"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service/Connector"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service/Connector"</span>, <span class="str">"addConnector"</span>,
+        <span class="str">"org.apache.catalina.connector.Connector"</span>);
+
+    <span class="cmt">// 6. 注册 Engine</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service/Engine"</span>,
+        <span class="str">"org.apache.catalina.core.StandardEngine"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service/Engine"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service/Engine"</span>, <span class="str">"setContainer"</span>,
+        <span class="str">"org.apache.catalina.Engine"</span>);
+
+    <span class="cmt">// 7. 注册 Host</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service/Engine/Host"</span>,
+        <span class="str">"org.apache.catalina.core.StandardHost"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service/Engine/Host"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service/Engine/Host"</span>, <span class="str">"addChild"</span>,
+        <span class="str">"org.apache.catalina.Container"</span>);
+
+    <span class="cmt">// 8. 注册 Context（server.xml 中静态配置的 Context）</span>
+    digester.<span class="fn">addObjectCreate</span>(<span class="str">"Server/Service/Engine/Host/Context"</span>,
+        <span class="str">"org.apache.catalina.core.StandardContext"</span>, <span class="str">"className"</span>);
+    digester.<span class="fn">addSetProperties</span>(<span class="str">"Server/Service/Engine/Host/Context"</span>);
+    digester.<span class="fn">addSetNext</span>(<span class="str">"Server/Service/Engine/Host/Context"</span>, <span class="str">"addChild"</span>,
+        <span class="str">"org.apache.catalina.Container"</span>);
+
+    <span class="kw">return</span> digester;
+}</code></pre>
+
+      <div class="callout tip">
+        <div class="label">三种核心 Rule</div>
+        <p><strong>ObjectCreateRule</strong>：遇到 XML 开始标签时，通过反射创建对应类的实例并压入 Digester 内部栈。<strong>SetPropertiesRule</strong>：将 XML 属性映射为对象 setter 方法调用（如 <code>port="8080"</code> → <code>setPort(8080)</code>）。<strong>SetNextRule</strong>：遇到 XML 结束标签时，将栈顶对象作为参数调用次顶对象的指定方法（如 <code>server.addService(service)</code>），建立父子关系。</p>
+      </div>
+
+      <h3>7.6 生命周期初始化：init() 级联</h3>
+
+      <p><code>Server.init()</code> 触发<strong>自顶向下的级联初始化</strong>。由于所有组件继承 <code>LifecycleBase</code>，<code>init()</code> 方法采用模板方法模式：先执行状态转换和事件通知，再调用子类实现的 <code>initInternal()</code>。</p>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+graph TD
+    S["Server.init()\nLifecycleBase.init()"]
+    S2["StandardServer.initInternal()"]
+    SV["Service.init()\n→ StandardService.initInternal()"]
+    ENG["Engine.init()\n→ StandardEngine.initInternal()"]
+    H["Host.init() ×N\n→ StandardHost.initInternal()"]
+    CTX["Context.init() ×N\n→ StandardContext.initInternal()"]
+    CONN["Connector.init() ×N\n→ Connector.initInternal()"]
+    EP["Endpoint.init()\n→ NioEndpoint.initInternal()\n创建 ServerSocketChannel"]
+    PH["ProtocolHandler.init()\n→ Http11NioProtocol.init()"]
+
+    S --> S2
+    S2 --> SV
+    SV --> ENG
+    ENG --> H
+    H --> CTX
+    SV --> CONN
+    CONN --> PH
+    PH --> EP
+
+    style S fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    style S2 fill:#334155,stroke:#38bdf8,color:#e2e8f0
+    style SV fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style ENG fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style H fill:#334155,stroke:#34d399,color:#e2e8f0
+    style CTX fill:#334155,stroke:#34d399,color:#e2e8f0
+    style CONN fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style PH fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style EP fill:#334155,stroke:#fbbf24,color:#e2e8f0
+        </pre>
+        <figcaption>图 11：组件 init() 级联调用树</figcaption>
+      </figure>
+
+      <h4>LifecycleBase 模板方法源码</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.util.LifecycleBase#init</span>
+<span class="kw">public abstract class</span> <span class="cls">LifecycleBase</span> <span class="kw">implements</span> <span class="cls">Lifecycle</span> {
+
+    <span class="kw">public final synchronized void</span> <span class="fn">init</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+        <span class="kw">if</span> (!state.equals(LifecycleState.NEW)) {
+            <span class="kw">return</span>;  <span class="cmt">// 仅 NEW 状态可初始化</span>
+        }
+
+        <span class="cmt">// 1. 触发 BEFORE_INIT_EVENT 事件</span>
+        setStateInternal(LifecycleState.INITIALIZING, <span class="kw">null</span>, <span class="kw">false</span>);
+
+        <span class="kw">try</span> {
+            <span class="cmt">// 2. 调用子类实现的初始化逻辑</span>
+            <span class="fn">initInternal</span>();
+        } <span class="kw">catch</span> (Throwable t) {
+            setStateInternal(LifecycleState.FAILED, <span class="kw">null</span>, <span class="kw">false</span>);
+            <span class="kw">throw new</span> <span class="cls">LifecycleException</span>(t);
+        }
+
+        <span class="cmt">// 3. 触发 AFTER_INIT_EVENT 事件，状态转为 INITIALIZED</span>
+        setStateInternal(LifecycleState.INITIALIZED, <span class="kw">null</span>, <span class="kw">false</span>);
+    }
+
+    <span class="kw">protected abstract void</span> <span class="fn">initInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span>;
+}</code></pre>
+
+      <h4>StandardServer.initInternal()</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.core.StandardServer#initInternal</span>
+<span class="kw">protected void</span> <span class="fn">initInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="kw">super</span>.<span class="fn">initInternal</span>();  <span class="cmt">// 注册 JMX MBean</span>
+
+    <span class="cmt">// 注册全局 String 缓存（减少重复字符串内存占用）</span>
+    onameStringCache = <span class="fn">register</span>(<span class="kw">new</span> StringCache(), <span class="str">"stringCache"</span>);
+
+    <span class="cmt">// 注册 MBeanFactory（支持通过 JMX 动态创建组件）</span>
+    MBeanFactory factory = <span class="kw">new</span> MBeanFactory();
+    factory.setContainer(<span class="kw">this</span>);
+    onameMBeanFactory = <span class="fn">register</span>(factory, <span class="str">"MBeanFactory"</span>);
+
+    <span class="cmt">// 注册 NamingResources（JNDI 命名资源）</span>
+    namingResources.<span class="fn">init</span>();
+
+    <span class="cmt">// 级联初始化所有 Service</span>
+    <span class="kw">for</span> (Service service : services) {
+        service.<span class="fn">init</span>();
+    }
+}</code></pre>
+
+      <h4>StandardService.initInternal() → Connector 初始化</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.core.StandardService#initInternal</span>
+<span class="kw">protected void</span> <span class="fn">initInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="kw">super</span>.<span class="fn">initInternal</span>();
+
+    <span class="cmt">// 1. 初始化 Engine（Container）</span>
+    <span class="kw">if</span> (engine != <span class="kw">null</span>) {
+        engine.<span class="fn">init</span>();  <span class="cmt">// → Engine → Host → Context 级联 init</span>
+    }
+
+    <span class="cmt">// 2. 初始化 Executor（共享线程池）</span>
+    <span class="kw">for</span> (Executor executor : executors) {
+        executor.<span class="fn">init</span>();
+    }
+
+    <span class="cmt">// 3. 初始化所有 Connector（连接器）</span>
+    <span class="kw">for</span> (Connector connector : connectors) {
+        <span class="kw">try</span> {
+            connector.<span class="fn">init</span>();
+        } <span class="kw">catch</span> (Exception e) { <span class="cmt">/* ... */</span> }
+    }
+}
+
+<span class="cmt">// org.apache.catalina.connector.Connector#initInternal</span>
+<span class="kw">protected void</span> <span class="fn">initInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="kw">super</span>.<span class="fn">initInternal</span>();
+
+    <span class="cmt">// 1. 创建 CoyoteAdapter（协议层 → 容器层的适配器）</span>
+    adapter = <span class="kw">new</span> CoyoteAdapter(<span class="kw">this</span>);
+    protocolHandler.<span class="fn">setAdapter</span>(adapter);
+
+    <span class="cmt">// 2. 配置解析器</span>
+    <span class="kw">if</span> (service != <span class="kw">null</span>) {
+        service.<span class="fn">getMapper</span>().<span class="fn">setDefaultHostName</span>(defaultHost);
+    }
+
+    <span class="cmt">// 3. 初始化 ProtocolHandler（→ Endpoint.init）</span>
+    <span class="kw">try</span> {
+        protocolHandler.<span class="fn">init</span>();
+    } <span class="kw">catch</span> (Exception e) { <span class="cmt">/* ... */</span> }
+}
+
+<span class="cmt">// org.apache.coyote.http11.AbstractHttp11Protocol#init → NioEndpoint#init</span>
+<span class="kw">public void</span> <span class="fn">init</span>() <span class="kw">throws</span> Exception {
+    <span class="kw">if</span> (getLog().<span class="fn">isDebugEnabled</span>()) {
+        getLog().<span class="fn">debug</span>(<span class="str">"Initializing ProtocolHandler ["</span> + getName() + <span class="str">"]"</span>);
+    }
+    <span class="cmt">// 创建工作线程池</span>
+    <span class="kw">if</span> (executor == <span class="kw">null</span>) {
+        <span class="fn">createExecutor</span>();
+    }
+    <span class="cmt">// 创建并绑定 ServerSocketChannel</span>
+    endpoint.<span class="fn">init</span>();
+}
+
+<span class="cmt">// org.apache.tomcat.util.net.AbstractEndpoint#init</span>
+<span class="kw">public final void</span> <span class="fn">init</span>() <span class="kw">throws</span> Exception {
+    <span class="kw">if</span> (bindOnInit) {
+        <span class="fn">bind</span>();  <span class="cmt">// NioEndpoint.bind(): 创建 ServerSocketChannel + bind(port)</span>
+    }
+}</code></pre>
+
+      <h3>7.7 生命周期启动：start() 级联</h3>
+
+      <p><code>Server.start()</code> 触发<strong>自顶向下的级联启动</strong>。与 init() 不同，start() 阶段会启动工作线程、Acceptor 线程、Poller 线程，并触发 Web 应用的部署和初始化。</p>
+
+      <pre><code><span class="cmt">// org.apache.catalina.util.LifecycleBase#start</span>
+<span class="kw">public final synchronized void</span> <span class="fn">start</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+
+    <span class="cmt">// 1. 如果未初始化，先 init</span>
+    <span class="kw">if</span> (state.equals(LifecycleState.NEW)) {
+        <span class="fn">init</span>();
+    }
+
+    <span class="cmt">// 2. 状态校验</span>
+    <span class="kw">if</span> (!state.equals(LifecycleState.INITIALIZED) &amp;&amp;
+        !state.equals(LifecycleState.STOPPED)) {
+        <span class="kw">return</span>;
+    }
+
+    <span class="cmt">// 3. 触发 BEFORE_START_EVENT</span>
+    setStateInternal(LifecycleState.STARTING_PREP, <span class="kw">null</span>, <span class="kw">false</span>);
+
+    <span class="kw">try</span> {
+        <span class="cmt">// 4. 调用子类实现的启动逻辑</span>
+        <span class="fn">startInternal</span>();
+    } <span class="kw">catch</span> (Throwable t) {
+        setStateInternal(LifecycleState.FAILED, <span class="kw">null</span>, <span class="kw">false</span>);
+        <span class="kw">throw new</span> <span class="cls">LifecycleException</span>(t);
+    }
+
+    <span class="cmt">// 5. 状态转为 STARTED</span>
+    setStateInternal(LifecycleState.STARTED, <span class="kw">null</span>, <span class="kw">false</span>);
+}
+
+<span class="cmt">// org.apache.catalina.core.StandardServer#startInternal</span>
+<span class="kw">protected void</span> <span class="fn">startInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="kw">super</span>.<span class="fn">startInternal</span>();
+
+    <span class="cmt">// 级联启动所有 Service</span>
+    <span class="kw">for</span> (Service service : services) {
+        service.<span class="fn">start</span>();
+    }
+}
+
+<span class="cmt">// org.apache.catalina.core.StandardService#startInternal</span>
+<span class="kw">protected void</span> <span class="fn">startInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="kw">super</span>.<span class="fn">startInternal</span>();
+
+    <span class="cmt">// 1. 启动 Engine</span>
+    <span class="kw">if</span> (engine != <span class="kw">null</span>) {
+        <span class="kw">synchronized</span> (engine) {
+            engine.<span class="fn">start</span>();
+        }
+    }
+
+    <span class="cmt">// 2. 启动 Executor</span>
+    <span class="kw">for</span> (Executor executor : executors) {
+        executor.<span class="fn">start</span>();
+    }
+
+    <span class="cmt">// 3. 启动所有 Connector</span>
+    <span class="kw">for</span> (Connector connector : connectors) {
+        <span class="kw">try</span> {
+            connector.<span class="fn">start</span>();
+        } <span class="kw">catch</span> (Exception e) { <span class="cmt">/* ... */</span> }
+    }
+}</code></pre>
+
+      <h4>Connector.startInternal() → 启动 Acceptor 和 Poller</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.connector.Connector#startInternal</span>
+<span class="kw">protected void</span> <span class="fn">startInternal</span>() <span class="kw">throws</span> <span class="cls">LifecycleException</span> {
+    <span class="cmt">// 状态转换</span>
+    setState(LifecycleState.STARTING);
+
+    <span class="kw">try</span> {
+        <span class="cmt">// 启动 ProtocolHandler → NioEndpoint.start()</span>
+        protocolHandler.<span class="fn">start</span>();
+    } <span class="kw">catch</span> (Exception e) {
+        <span class="kw">throw new</span> <span class="cls">LifecycleException</span>(e);
+    }
+}
+
+<span class="cmt">// org.apache.tomcat.util.net.NioEndpoint#startInternal</span>
+<span class="kw">public void</span> <span class="fn">startInternal</span>() <span class="kw">throws</span> Exception {
+
+    <span class="cmt">// 1. 创建工作线程池（如果尚未在 init 阶段创建）</span>
+    <span class="kw">if</span> (!getDelegate()) {
+        <span class="kw">if</span> (executor == <span class="kw">null</span>) {
+            <span class="fn">createExecutor</span>();
+        }
+    }
+
+    <span class="cmt">// 2. 创建 Poller 线程（默认 1 个，最多 2 个）</span>
+    pollers = <span class="kw">new</span> Poller[getPollerThreadCount()];
+    <span class="kw">for</span> (<span class="kw">int</span> i = <span class="num-lit">0</span>; i &lt; pollers.length; i++) {
+        pollers[i] = <span class="kw">new</span> Poller();
+        Thread pollerThread = <span class="kw">new</span> Thread(pollers[i], getName() + <span class="str">"-Poller-"</span>);
+        pollerThread.setPriority(threadPriority);
+        pollerThread.setDaemon(<span class="kw">true</span>);
+        pollerThread.<span class="fn">start</span>();  <span class="cmt">// 启动 Poller 线程</span>
+    }
+
+    <span class="cmt">// 3. 创建 Acceptor 线程（默认 1 个）</span>
+    acceptors = <span class="kw">new</span> Acceptor[getAcceptorThreadCount()];
+    <span class="kw">for</span> (<span class="kw">int</span> i = <span class="num-lit">0</span>; i &lt; acceptors.length; i++) {
+        acceptors[i] = <span class="kw">new</span> Acceptor&lt;&gt;(<span class="kw">this</span>);
+        String threadName = getName() + <span class="str">"-Acceptor-"</span> + i;
+        Thread t = <span class="kw">new</span> Thread(acceptors[i], threadName);
+        t.setPriority(threadPriority);
+        t.setDaemon(<span class="kw">true</span>);
+        t.<span class="fn">start</span>();  <span class="cmt">// 启动 Acceptor 线程</span>
+    }
+}</code></pre>
+
+      <div class="callout tip">
+        <div class="label">关键时序</div>
+        <p>init() 阶段只创建和绑定 <code>ServerSocketChannel</code>，<strong>不启动任何线程</strong>。start() 阶段才启动 Acceptor 线程（开始接收连接）、Poller 线程（开始轮询 I/O 事件）和工作线程池。这意味着 <code>server.xml</code> 解析完成后到 start() 之前，Tomcat 尚未监听任何端口。</p>
+      </div>
+
+      <h3>7.8 Web 应用部署：HostConfig 与 ContextConfig</h3>
+
+      <p>在 Engine/Host 启动阶段，Tomcat 通过 <strong>HostConfig</strong>（生命周期监听器）自动扫描 <code>webapps</code> 目录并部署 Web 应用。每个 Web 应用的初始化由 <strong>ContextConfig</strong> 完成，包括解析 <code>web.xml</code>、创建 Servlet、Filter、Listener。</p>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+graph TD
+    HS["Host.start()\n触发 CONFIGURE_START_EVENT"]
+    HC["HostConfig.lifecycleEvent()\n检测到启动事件"]
+    DEP["deployApps()\n扫描 webapps 目录"]
+    WAR["解析 WAR 文件"]
+    XML["解析 context.xml"]
+    DIR["扫描目录结构"]
+
+    DEP --> WAR
+    DEP --> XML
+    DEP --> DIR
+
+    SC["创建 StandardContext\naddChild 到 Host"]
+    CS["Context.start()\n触发 ContextConfig"]
+    CC["ContextConfig.lifecycleEvent()\nCONFIGURE_START_EVENT"]
+    WEBXML["解析 web.xml / web-fragment.xml"]
+    FILT["创建 FilterDef / FilterMap"]
+    SERV["创建 Wrapper（封装 Servlet）"]
+    LIST["注册 Listener"]
+    INIT["Listener.contextInitialized()\nServlet.init()（loadOnStartup）"]
+
+    WAR --> SC
+    XML --> SC
+    DIR --> SC
+    SC --> CS --> CC --> WEBXML
+    WEBXML --> FILT
+    WEBXML --> SERV
+    WEBXML --> LIST
+    FILT --> INIT
+    SERV --> INIT
+    LIST --> INIT
+
+    style HS fill:#1e293b,stroke:#34d399,color:#e2e8f0
+    style HC fill:#334155,stroke:#34d399,color:#e2e8f0
+    style DEP fill:#334155,stroke:#34d399,color:#e2e8f0
+    style SC fill:#334155,stroke:#a78bfa,color:#e2e8f0
+    style CC fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style WEBXML fill:#334155,stroke:#fbbf24,color:#e2e8f0
+    style INIT fill:#1e293b,stroke:#f87171,color:#e2e8f0
+        </pre>
+        <figcaption>图 12：Web 应用自动部署与初始化流程</figcaption>
+      </figure>
+
+      <h4>HostConfig：自动部署源码</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.HostConfig#lifecycleEvent</span>
+<span class="kw">public void</span> <span class="fn">lifecycleEvent</span>(LifecycleEvent event) {
+    <span class="kw">if</span> (event.getType().equals(Lifecycle.PERIODIC_EVENT)) {
+        <span class="cmt">// 定期检查（autoDeploy 热部署）</span>
+        <span class="fn">check</span>();
+    } <span class="kw">else if</span> (event.getType().equals(Lifecycle.BEFORE_START_EVENT)) {
+        <span class="cmt">// Host 启动前：部署应用</span>
+        <span class="kw">if</span> (host.getAutoDeploy()) {
+            <span class="fn">deployApps</span>();
+        }
+    }
+}
+
+<span class="cmt">// 扫描 webapps 目录部署应用</span>
+<span class="kw">protected void</span> <span class="fn">deployApps</span>() {
+    File appBase = host.getAppBaseFile();
+    String[] filteredAppPaths = <span class="fn">filterAppPaths</span>(appBase.<span class="fn">list</span>());
+
+    <span class="kw">for</span> (String name : filteredAppPaths) {
+        <span class="kw">if</span> (name.<span class="fn">endsWith</span>(<span class="str">".war"</span>)) {
+            <span class="cmt">// 1. WAR 文件部署</span>
+            <span class="fn">deployWAR</span>(appBase, name);
+        } <span class="kw">else if</span> (<span class="kw">new</span> File(appBase, name).isDirectory()) {
+            <span class="cmt">// 2. 目录部署</span>
+            <span class="fn">deployDirectory</span>(appBase, name);
+        }
+    }
+
+    <span class="cmt">// 3. 部署 server.xml 中配置的 context</span>
+    <span class="kw">for</span> (DeployedApplication app : deployed.values()) {
+        <span class="kw">if</span> (!app.<span class="fn">deployed</span>) {
+            <span class="fn">deployApp</span>(app);
+        }
+    }
+}
+
+<span class="cmt">// 部署单个 Web 应用</span>
+<span class="kw">protected void</span> <span class="fn">deployDirectory</span>(File appBase, String contextName) {
+    Context context = <span class="kw">null</span>;
+    <span class="kw">try</span> {
+        <span class="kw">if</span> (host.getXmlBase() != <span class="kw">null</span>) {
+            <span class="cmt">// 检查是否有独立的 context XML 配置</span>
+            File contextXml = <span class="kw">new</span> File(host.getXmlBase(), contextName + <span class="str">".xml"</span>);
+            <span class="kw">if</span> (contextXml.exists()) {
+                context = <span class="fn">deployDirectory</span>(contextXml, dir, contextName);
+            }
+        }
+
+        <span class="kw">if</span> (context == <span class="kw">null</span>) {
+            <span class="cmt">// 创建 StandardContext 并设置 docBase</span>
+            context = (Context) Class.forName(contextClass).newInstance();
+            context.setName(contextName);
+            context.setPath(<span class="str">"/"</span> + contextName);
+            context.setDocBase(dir.getAbsolutePath());
+
+            <span class="cmt">// 添加 ContextConfig 作为生命周期监听器</span>
+            Class&lt;?&gt; clazz = Class.forName(host.getConfigClass());
+            LifecycleListener listener = (LifecycleListener) clazz.newInstance();
+            context.<span class="fn">addLifecycleListener</span>(listener);
+        }
+
+        <span class="cmt">// 添加到 Host（触发 Context 的 init + start）</span>
+        host.<span class="fn">addChild</span>(context);
+    } <span class="kw">catch</span> (Exception e) { <span class="cmt">/* ... */</span> }
+}</code></pre>
+
+      <h4>ContextConfig：解析 web.xml</h4>
+
+      <pre><code><span class="cmt">// org.apache.catalina.startup.ContextConfig#lifecycleEvent</span>
+<span class="kw">public void</span> <span class="fn">lifecycleEvent</span>(LifecycleEvent event) {
+    <span class="kw">if</span> (event.getType().equals(Lifecycle.CONFIGURE_START_EVENT)) {
+        <span class="cmt">// Context 启动时触发配置解析</span>
+        <span class="fn">configureStart</span>();
+    }
+}
+
+<span class="kw">protected synchronized void</span> <span class="fn">configureStart</span>() {
+    <span class="cmt">// 1. 解析 WEB-INF/web.xml</span>
+    <span class="kw">if</span> (!webConfig.<span class="fn">isMetadataComplete</span>()) {
+        <span class="fn">webConfig</span>();  <span class="cmt">// → parseWebXml()</span>
+    }
+
+    <span class="cmt">// 2. 配置 Context 属性</span>
+    <span class="fn">configureContext</span>(webConfig);
+
+    <span class="cmt">// 3. 初始化安全配置</span>
+    <span class="fn">applicationSecurityConfig</span>();
+}
+
+<span class="cmt">// 解析 web.xml 核心逻辑</span>
+<span class="kw">protected void</span> <span class="fn">webConfig</span>() {
+    <span class="cmt">// 解析顺序:
+</span>    <span class="cmt">// 1. WEB-INF/web.xml (主配置文件)
+</span>    <span class="cmt">// 2. web-fragment.xml (JAR 包中的 Servlet 3.0 fragment)
+</span>    <span class="cmt">// 3. @WebServlet / @WebFilter / @WebListener 注解（如果 metadata-complete=false）
+</span>    <span class="cmt">// 4. $CATALINA_BASE/conf/web.xml (全局默认配置)
+</span>
+    InputSource contextWebXml = <span class="kw">new</span> InputSource(
+        context.getServletContext().getResource(<span class="str">"/WEB-INF/web.xml"</span>));
+    WebXml webXml = <span class="kw">new</span> WebXml();
+    webXml.setVersion(<span class="str">"3.1"</span>);
+
+    <span class="cmt">// 使用 Digester 解析 web.xml</span>
+    Digester digester = <span class="fn">getDigester</span>(<span class="kw">true</span>);
+    <span class="kw">try</span> (InputStream is = contextWebXml.getByteStream()) {
+        digester.<span class="fn">parse</span>(is);
+    }
+
+    <span class="cmt">// 合并 fragment 和注解配置</span>
+    Set&lt;WebXml&lt;WebXml&gt;&gt; fragments = <span class="fn">processJarsForWebFragments</span>(webXml);
+    Map&lt;String, WebXml&gt; orderedFragments = <span class="fn">orderFragments</span>(webXml, fragments);
+    webXml.<span class="fn">merge</span>(orderedFragments);
+
+    <span class="cmt">// 将解析结果配置到 Context</span>
+    <span class="fn">configureContext</span>(webXml);
+}
+
+<span class="cmt">// 将 WebXml 配置映射为 Context 内部组件</span>
+<span class="kw">private void</span> <span class="fn">configureContext</span>(WebXml webXml) {
+    context.setPublicId(webXml.getPublicId());
+
+    <span class="cmt">// 1. 创建 Servlet → Wrapper</span>
+    <span class="kw">for</span> (ServletDef servlet : webXml.getServlets().values()) {
+        Wrapper wrapper = context.createWrapper();
+        wrapper.setServletClass(servlet.getServletClass());
+        wrapper.setServletName(servlet.getServletName());
+        <span class="kw">if</span> (servlet.getLoadOnStartup() != <span class="kw">null</span>) {
+            wrapper.setLoadOnStartup(servlet.getLoadOnStartup().intValue());
+        }
+        context.addChild(wrapper);  <span class="cmt">// Wrapper 加入 Context</span>
+        <span class="fn">addServletMappingDecoded</span>(context, servlet.getMappings(), wrapper.getName());
+    }
+
+    <span class="cmt">// 2. 创建 Filter</span>
+    <span class="kw">for</span> (FilterDef filter : webXml.getFilters().values()) {
+        context.<span class="fn">addFilterDef</span>(filter);
+    }
+    <span class="kw">for</span> (FilterMap filterMap : webXml.getFilterMappings()) {
+        context.<span class="fn">addFilterMap</span>(filterMap);
+    }
+
+    <span class="cmt">// 3. 注册 Listener</span>
+    <span class="kw">for</span> (String listener : webXml.getListeners()) {
+        context.<span class="fn">addApplicationListener</span>(listener);
+    }
+}</code></pre>
+
+      <h3>7.9 启动完成与 await 阻塞</h3>
+
+      <p>所有组件 start() 完成后，<code>Catalina.start()</code> 调用 <code>Catalina.await()</code>，该方法内部调用 <code>Server.await()</code>，阻塞当前线程等待关闭指令。</p>
+
+      <pre><code><span class="cmt">// org.apache.catalina.core.StandardServer#await</span>
+<span class="kw">public void</span> <span class="fn">await</span>() {
+    <span class="cmt">// 如果 shutdown port = -1，表示不等待，直接返回</span>
+    <span class="kw">if</span> (port == -<span class="num-lit">1</span>) {
+        <span class="kw">return</span>;
+    }
+
+    <span class="cmt">// 创建 ServerSocket 监听 shutdown 端口（默认 8005）</span>
+    <span class="kw">try</span> (ServerSocket serverSocket = <span class="kw">new</span> ServerSocket(port, <span class="num-lit">1</span>,
+            InetAddress.getByName(address))) {
+
+        <span class="kw">while</span> (<span class="kw">true</span>) {
+            <span class="cmt">// 阻塞等待连接</span>
+            Socket socket = serverSocket.<span class="fn">accept</span>();
+            socket.setSoTimeout(<span class="num-lit">10</span> * <span class="num-lit">1000</span>);  <span class="cmt">// 10s 超时</span>
+
+            <span class="cmt">// 读取关闭指令</span>
+            InputStream is = socket.getInputStream();
+            <span class="kw">int</span> ch = -<span class="num-lit">1</span>;
+            StringBuilder expected = <span class="kw">new</span> StringBuilder();
+            <span class="kw">while</span> ((ch = is.read()) != -<span class="num-lit">1</span>) {
+                expected.append((<span class="kw">char</span>) ch);
+            }
+
+            <span class="cmt">// 匹配 shutdown 命令（server.xml 中配置的 shutdown 属性）</span>
+            String shutdown = <span class="kw">this</span>.shutdown;
+            <span class="kw">if</span> (shutdown != <span class="kw">null</span> &amp;&amp; expected.toString().equals(shutdown)) {
+                <span class="kw">break</span>;  <span class="cmt">// 收到正确关闭指令，退出循环</span>
+            }
+        }
+    } <span class="kw">catch</span> (IOException e) {
+        <span class="cmt">// 异常退出</span>
+    }
+}</code></pre>
+
+      <div class="callout warn">
+        <div class="label">关闭流程</div>
+        <p>当 <code>await()</code> 收到正确的 shutdown 字符串（默认 <code>"SHUTDOWN"</code>）后返回，<code>Catalina.start()</code> 继续执行 <code>stop()</code>。<code>stop()</code> 调用 <code>Server.stop()</code>，触发<strong>自底向上的级联停止</strong>：先停 Connector（停止接收新请求），再停 Context/Host/Engine（销毁 Servlet），最后释放资源。这与启动时的自顶向下相反，确保优雅关闭。</p>
+      </div>
+
+      <h3>7.10 启动全流程时序图</h3>
+
+      <figure class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    participant Main as main()
+    participant Boot as Bootstrap
+    participant Cat as Catalina
+    participant Dig as Digester
+    participant Srv as StandardServer
+    participant Svc as StandardService
+    participant Conn as Connector
+    participant EP as NioEndpoint
+    participant Host as StandardHost
+    participant HC as HostConfig
+    participant Ctx as StandardContext
+    participant CC as ContextConfig
+
+    Main->>Boot: main(["start"])
+    Boot->>Boot: init() — 创建 ClassLoader + 反射加载 Catalina
+    Boot->>Cat: load(args)
+    Cat->>Dig: createStartDigester() — 注册解析规则
+    Cat->>Dig: parse(server.xml)
+    Note over Dig: 创建 StandardServer/Service/<br/>Connector/Engine/Host 对象树
+    Cat->>Srv: server.init()
+    Srv->>Svc: service.init() (级联)
+    Svc->>Conn: connector.init()
+    Conn->>EP: endpoint.init() — bind(ServerSocketChannel)
+    Cat->>Srv: server.start()
+    Srv->>Svc: service.start() (级联)
+    Svc->>Host: engine.start() → host.start()
+    Host->>HC: BEFORE_START_EVENT
+    HC->>HC: deployApps() — 扫描 webapps
+    HC->>Ctx: host.addChild(context) — 创建 StandardContext
+    Ctx->>CC: CONFIGURE_START_EVENT
+    CC->>CC: webConfig() — 解析 web.xml
+    Note over CC: 创建 Wrapper/Filter/Listener
+    Ctx->>Ctx: Servlet.init() (loadOnStartup)
+    Svc->>Conn: connector.start()
+    Conn->>EP: endpoint.startInternal()
+    Note over EP: 启动 Poller 线程 + Acceptor 线程
+    Cat->>Cat: server.await() — 阻塞等待 SHUTDOWN
+        </pre>
+        <figcaption>图 13：Tomcat 8.5 完整启动时序图</figcaption>
+      </figure>
+
+      <h3>7.11 启动阶段总结</h3>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>阶段</th><th>核心类</th><th>关键方法</th><th>产物</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>① 类加载器初始化</td><td><code>Bootstrap</code></td><td><code>init()</code></td><td>Common/Catalina/Shared ClassLoader + Catalina 实例</td></tr>
+            <tr><td>② 配置加载</td><td><code>Catalina</code> + <code>Digester</code></td><td><code>load()</code> → <code>parse()</code></td><td>Server/Service/Connector/Engine/Host 对象树</td></tr>
+            <tr><td>③ 级联初始化</td><td><code>LifecycleBase</code></td><td><code>init()</code> → <code>initInternal()</code></td><td>ServerSocketChannel 绑定 + JMX 注册</td></tr>
+            <tr><td>④ 级联启动</td><td><code>LifecycleBase</code></td><td><code>start()</code> → <code>startInternal()</code></td><td>Acceptor/Poller 线程 + 工作线程池运行</td></tr>
+            <tr><td>⑤ Web 应用部署</td><td><code>HostConfig</code></td><td><code>deployApps()</code></td><td>StandardContext 创建并加入 Host</td></tr>
+            <tr><td>⑥ web.xml 解析</td><td><code>ContextConfig</code></td><td><code>webConfig()</code></td><td>Wrapper/FilterDef/FilterMap/Listener 注册</td></tr>
+            <tr><td>⑦ Servlet 初始化</td><td><code>StandardWrapper</code></td><td><code>loadServlet()</code></td><td>Servlet 实例化 + <code>init()</code> 调用</td></tr>
+            <tr><td>⑧ 阻塞等待</td><td><code>StandardServer</code></td><td><code>await()</code></td><td>监听 shutdown 端口，阻塞主线程</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <div class="label">设计哲学总结</div>
+        <p>Tomcat 的启动架构体现了三个核心设计模式：<strong>模板方法模式</strong>（LifecycleBase 定义 init/start 模板，子类实现 initInternal/startInternal）、<strong>观察者模式</strong>（Lifecycle 事件驱动 HostConfig/ContextConfig 部署）、<strong>责任链模式</strong>（Pipeline-Valve 在启动完成后接管请求处理）。这种分层设计使得 Tomcat 可以灵活配置、优雅启停，同时保持组件间的松耦合。</p>
+      </div>
+    </section>
+
     <footer>
       <div class="sources">
         <h2>参考资料</h2>
@@ -1515,6 +2590,7 @@ JAVA_OPTS="$JAVA_OPTS -Djava.rmi.server.hostname=10.0.0.1"</code></pre>
       </div>
     </footer>
   </article>
+  </div><!-- /.layout -->
 
   <!-- Required: ECharts -->
   <script src="./_shared/js/echarts.min.js"></script>
@@ -1539,5 +2615,64 @@ JAVA_OPTS="$JAVA_OPTS -Djava.rmi.server.hostname=10.0.0.1"</code></pre>
     });
   </script>
   <script src="assets/charts.js"></script>
+
+  <!-- 滚动高亮：当前阅读章节自动高亮侧边栏 -->
+  <script>
+  (function() {
+    var sections = document.querySelectorAll('section[id]');
+    var tocLinks = document.querySelectorAll('#sidebar-toc a');
+    var linkMap = {};
+    tocLinks.forEach(function(link) {
+      var href = link.getAttribute('href');
+      if (href && href.charAt(0) === '#') {
+        linkMap[href.substring(1)] = link;
+      }
+    });
+
+    function highlightActive() {
+      var scrollPos = window.scrollY + 120;
+      var currentId = null;
+      sections.forEach(function(sec) {
+        var top = sec.offsetTop;
+        var height = sec.offsetHeight;
+        if (scrollPos >= top && scrollPos < top + height) {
+          currentId = sec.id;
+        }
+      });
+      // 如果滚动到底部，高亮最后一个
+      if (!currentId && (window.innerHeight + window.scrollY) >= document.body.offsetHeight - 50) {
+        currentId = sections[sections.length - 1].id;
+      }
+      tocLinks.forEach(function(link) { link.classList.remove('active'); });
+      if (currentId && linkMap[currentId]) {
+        linkMap[currentId].classList.add('active');
+        // 自动滚动 TOC 使 active 项可见
+        var activeLink = linkMap[currentId];
+        var toc = document.getElementById('sidebar-toc');
+        var linkTop = activeLink.offsetTop;
+        var linkBottom = linkTop + activeLink.offsetHeight;
+        var tocScrollTop = toc.scrollTop;
+        var tocHeight = toc.clientHeight;
+        if (linkTop < tocScrollTop) {
+          toc.scrollTop = linkTop - 20;
+        } else if (linkBottom > tocScrollTop + tocHeight) {
+          toc.scrollTop = linkBottom - tocHeight + 20;
+        }
+      }
+    }
+
+    var ticking = false;
+    window.addEventListener('scroll', function() {
+      if (!ticking) {
+        window.requestAnimationFrame(function() {
+          highlightActive();
+          ticking = false;
+        });
+        ticking = true;
+      }
+    });
+    highlightActive();
+  })();
+  </script>
 </body>
 </html>
